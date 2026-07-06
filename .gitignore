@@ -36,3 +36,19 @@ __pycache__/
 .agents/
 .claude/
 skills-lock.json
+
+# Go
+/bin/
+*.exe
+/services/scanner/dist/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.env
+
+# infra / secrets
+*.pem
+.env.*
+!.env.example
