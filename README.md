@@ -8,6 +8,9 @@ findings across sessions and regions, recall prior context via distributed vecto
 enforce scope as immutable transactional data with a full SQL audit trail.** Without that memory
 the agent doesn't degrade — it stops.
 
+**Live demo:** _not yet deployed_ — one-click deploy in [Deploy Mission Control](#deploy-mission-control) below.
+<!-- After the first deploy, replace the line above with: **Live demo:** https://<project>.vercel.app -->
+
 ---
 
 ## Judging axes, one sentence each
@@ -70,6 +73,19 @@ pnpm dev          # → http://localhost:3000
 Routes: `/` Overview · `/targets` · `/runs` Live Runs · `/findings` · `/memory` · `/scope` ·
 `/audit`. The UI is currently wired to representative fixture data; it points at the live gateway
 once P2 lands.
+
+## Deploy Mission Control
+
+The web app deploys to **Vercel** as-is — every route prerenders to static and runs on fixture
+data, so no backend is required for the demo. Build settings live in
+[`apps/web/vercel.json`](apps/web/vercel.json).
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fzwanski2019%2FMNEMOS&project-name=mnemos&root-directory=apps%2Fweb)
+
+Or import manually: **Add New → Project → import `zwanski2019/MNEMOS`**, then set **Root Directory =
+`apps/web`** (the pnpm workspace and Next.js are auto-detected). After the first deploy, put the
+`*.vercel.app` URL in the **Live demo** link at the top of this file and in the repo's
+**About → Website** field.
 
 ## Status
 
