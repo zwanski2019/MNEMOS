@@ -4,3 +4,7 @@ packages:
 # sharp is an optional Next.js image-optimization dep; its native build is not needed for `next build`.
 allowBuilds:
   sharp: false
+# Force the postcss transitively bundled by next up to the patched line
+# (GHSA-qx2v-qp2m-jg93, <8.5.10). pnpm v11 reads overrides from here, not package.json.
+overrides:
+  postcss: ">=8.5.10"
