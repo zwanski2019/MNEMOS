@@ -1,0 +1,14 @@
+{
+  "name": "mnemos",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MNEMOS — an autonomous reconnaissance agent whose memory is the product. CockroachDB × AWS Hackathon.",
+  "license": "MIT",
+  "packageManager": "pnpm@11.10.0",
+  "scripts": {
+    "dev": "pnpm --filter @mnemos/web dev",
+    "build": "pnpm --filter @mnemos/web build",
+    "start": "pnpm --filter @mnemos/web start",
+    "lint": "pnpm --filter @mnemos/web lint"
+  }
+}

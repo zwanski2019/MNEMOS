@@ -1,0 +1,6 @@
+packages:
+  - apps/*
+  - packages/*
+# sharp is an optional Next.js image-optimization dep; its native build is not needed for `next build`.
+allowBuilds:
+  sharp: false

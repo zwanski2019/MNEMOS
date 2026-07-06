@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background-color: #0e1416;
+  color: #dde4e5;
+}
+
+/* Terminal-style scrollbars shared across dense data tables. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0e14;
+}
+::-webkit-scrollbar-thumb {
+  background: #2f3638;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3c494c;
+}
+
+/* Grid backdrop used by the Memory vector map. */
+.grid-bg {
+  background-size: 40px 40px;
+  background-image: linear-gradient(to right, rgba(60, 73, 76, 0.1) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(60, 73, 76, 0.1) 1px, transparent 1px);
+}
+
+/* Dotted backdrop used by the Scope ledger. */
+.bg-pattern {
+  background-image: radial-gradient(#2f3638 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* Honor the OS "reduce motion" setting: cut the decorative pulses/pings
+   (telemetry dots, sync beacons) down to a single frame. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

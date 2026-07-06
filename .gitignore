@@ -1,0 +1,38 @@
+# deps
+node_modules/
+.pnpm-store/
+
+# next
+apps/web/.next/
+apps/web/out/
+apps/web/next-env.d.ts
+
+# build
+dist/
+build/
+*.tsbuildinfo
+
+# env / secrets
+.env
+.env.local
+.env.*.local
+*.pem
+
+# go
+services/scanner/bin/
+*.test
+
+# python
+__pycache__/
+.venv/
+*.pyc
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+
+# local agent tooling (not part of the submission)
+.agents/
+.claude/
+skills-lock.json

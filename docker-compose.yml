@@ -1,0 +1,38 @@
+# Local dev dependencies: single-node CockroachDB + NATS JetStream + minio (S3-compatible).
+# Production runs against CockroachDB Cloud on AWS; this is for offline development only.
+services:
+  crdb:
+    image: cockroachdb/cockroach:latest-v24.3
+    command: start-single-node --insecure
+    ports:
+      - "26257:26257" # SQL
+      - "8081:8080" # DB console
+    volumes:
+      - crdb-data:/cockroach/cockroach-data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health?ready=1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2-alpine
+    command: ["-js"]
+    ports:
+      - "4222:4222"
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+volumes:
+  crdb-data:
+  minio-data:
