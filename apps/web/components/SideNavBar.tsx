@@ -12,6 +12,7 @@ const NAV: NavItem[] = [
   { href: "/runs", icon: "play_circle", label: "Live Runs" },
   { href: "/findings", icon: "search_check", label: "Findings" },
   { href: "/memory", icon: "database", label: "Memory" },
+  { href: "/intelligence", icon: "lightbulb", label: "Intel" },
   { href: "/scope", icon: "security", label: "Scope" },
   { href: "/audit", icon: "history", label: "Audit" },
 ];
