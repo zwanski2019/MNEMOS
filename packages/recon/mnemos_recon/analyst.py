@@ -44,8 +44,13 @@ Rules:
   summary rather than inventing novelty.
 - Be specific and short. A triage engineer reads this at 2am.
 
+- Report how sure you are. A hedge is more useful than false confidence: the
+  gateway uses your certainty as evidence, not as the answer, and a low number
+  costs nothing while an overconfident one poisons the operator's trust.
+
 Reply with ONLY a JSON object:
-{"title": str, "severity": "info|low|medium|high|critical", "summary": str}"""
+{"title": str, "severity": "info|low|medium|high|critical", "summary": str,
+ "certainty": float between 0 and 1}"""
 
 
 @dataclass
@@ -115,6 +120,8 @@ class BedrockAnalyst:
                 severity=_coerce_severity(payload.get("severity"), obs.severity),
                 summary=payload.get("summary") or obs.detail,
                 evidence=obs.evidence,
+                source_kind=obs.kind,
+                analyst_certainty=_coerce_certainty(payload.get("certainty")),
             ),
             input_tokens=tin,
             output_tokens=tout,
@@ -142,6 +149,14 @@ class OfflineAnalyst:
                 f"this target, so treating it as newly surfaced. Evidence: {obs.evidence}"
             )
         prompt_len = len(SYSTEM_PROMPT) + len(_user_prompt(obs, recalled))
+        # Derived from the observation, not asserted. The offline analyst has no
+        # judgement to offer, so it reports the scanner's own precision and lets
+        # the gateway weight it — rather than fabricating a confidence it did not
+        # earn, which would be indistinguishable from a real one downstream.
+        certainty = 0.75 if obs.kind in ("secret", "exposure") else 0.5
+        if prior:
+            certainty = min(0.9, certainty + 0.1)
+
         return Proposal(
             candidate=Candidate(
                 host=obs.host,
@@ -149,6 +164,8 @@ class OfflineAnalyst:
                 severity=obs.severity,
                 summary=summary,
                 evidence=obs.evidence,
+                source_kind=obs.kind,
+                analyst_certainty=certainty,
             ),
             # Charged so the ceiling logic is exercised identically offline.
             input_tokens=prompt_len // 4,
@@ -165,6 +182,17 @@ def _coerce_severity(value: object, fallback: str) -> str:
     if isinstance(value, str) and value.lower() in _SEVERITIES:
         return value.lower()
     return fallback if fallback in _SEVERITIES else "info"
+
+
+def _coerce_certainty(value: object) -> float | None:
+    """A model that returns nonsense for certainty gets no vote, not a default."""
+    try:
+        certainty = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not 0.0 <= certainty <= 1.0:
+        return None
+    return certainty
 
 
 def _parse_json_object(text: str) -> dict:
