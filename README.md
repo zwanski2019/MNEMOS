@@ -13,6 +13,13 @@ does not degrade gracefully — it stops.**
 
 **Live demo:** https://mnemos-mission-control.vercel.app
 
+Mission Control is not a mockup. Every figure on it — table counts, severity split,
+total spend, the audit stream, the findings memory has seen more than once — is read
+out of the live CockroachDB Cloud cluster at request time. When the database is
+unreachable it says so instead of showing placeholder numbers, because an operator has
+to be able to tell *"nothing found"* from *"we cannot see"*. It connects with a
+`SELECT`-only role, so the public console cannot write to memory.
+
 ---
 
 ## See it in 60 seconds
