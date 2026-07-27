@@ -144,9 +144,20 @@ the memory it is reasoning over.
 
 - **Amazon Bedrock** — Claude as the analyst (`converse`), Titan Text Embeddings V2
   for every vector CockroachDB indexes.
+- **Amazon S3** — content-addressed raw artifacts. Bytes go to S3, the **content
+  address** goes to CockroachDB, so memory stays queryable and joinable in SQL next to
+  the vectors and the audit trail while the blobs stay cheap. Keys are
+  `artifacts/<sha[:2]>/<sha256>`, which makes the store idempotent: the same bundle
+  served from ten hosts is uploaded once, and a re-scan that finds nothing changed
+  uploads nothing at all. Buckets are created with public access blocked, SSE-AES256,
+  and versioning on. **Verified end to end** against a live bucket.
 - **AWS Lambda** — the deterministic Go scanner core, event-driven off NATS.
-- **Amazon S3** — content-addressed raw artifacts; the address and metadata stay in
-  CockroachDB so memory remains queryable and joinable next to the vectors.
+
+> **Bedrock status.** The code path is written and probed on every run
+> (`BedrockTitanEmbedder`, `BedrockAnalyst`). On the submission account every Bedrock
+> on-demand quota is currently `0`, so the probe fails and the run degrades to the
+> labelled offline stand-ins rather than dying mid-cycle. S3 is real AWS regardless.
+> Raise the quota and `MNEMOS_EMBEDDER=bedrock MNEMOS_ANALYST=bedrock` needs no code change.
 
 ---
 

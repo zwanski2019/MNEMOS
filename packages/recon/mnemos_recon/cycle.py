@@ -64,7 +64,7 @@ def run_cycle(
             asset_id = mem.record_asset(target_id, asset.kind, asset.url, run_id=run_id)
             artifact_id = mem.record_artifact(
                 target_id, asset_id, asset.body.encode(),
-                s3_bucket=None, content_type="application/javascript",
+                content_type="application/javascript",
             )
             mem.index_text(target_id, asset.body, artifact_id=artifact_id, run_id=run_id)
             for obs in scan(asset.host, asset.url, asset.body):
