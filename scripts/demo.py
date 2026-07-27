@@ -20,10 +20,17 @@ import logging
 import os
 import sys
 import textwrap
+from datetime import datetime, timedelta, timezone
 
 from mnemos_memory import Memory, migrate
 from mnemos_memory.embeddings import get_embedder
-from mnemos_recon import ensure_target, get_analyst, run_cycle
+from mnemos_recon import (
+    ensure_second_target,
+    ensure_target,
+    get_analyst,
+    run_cycle,
+    run_second_estate,
+)
 
 RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
 CYAN, AMBER, GREEN, RED = "\033[36m", "\033[33m", "\033[32m", "\033[31m"
@@ -81,6 +88,42 @@ def main() -> int:
         for table, count in mem.stats().items():
             print(f"  {table:<16} {count:>6}")
 
+        rule("3 · a second estate — same code path, different target")
+        second_id = ensure_second_target(mem)
+        third = run_second_estate(mem, second_id, analyst=analyst, ceiling_usd=args.ceiling)
+        report(third)
+
+        rule("cross-target correlation — what no single scan can see")
+        correlations = mem.correlations()
+        if not correlations:
+            print(f"  {DIM}(nothing shared between estates yet){RESET}")
+        for c in correlations:
+            label = c.key if c.kind == "finding" else f"{c.key[:16]}…"
+            print(f"  {AMBER}{c.kind:<8}{RESET} {label}")
+            print(f"           {DIM}{c.detail} — {', '.join(c.targets)}{RESET}")
+
+        rule("time travel — AS OF SYSTEM TIME")
+        now_stats = mem.stats()
+        for mins in (1, 10, 45):
+            past = mem.snapshot_at(datetime.now(timezone.utc) - timedelta(minutes=mins))
+            if past is None:
+                print(f"  {mins:>3}m ago  {DIM}outside the cluster's GC window{RESET}")
+                continue
+            delta = now_stats["findings"] - past["findings"]
+            print(f"  {mins:>3}m ago  findings={past['findings']:<4} "
+                  f"scope_rules={past['scope_decisions']:<4} audit={past['audit_log']:<5}"
+                  f"{DIM}(+{delta} findings since){RESET}")
+        print(f"  {DIM}This is not replayed from a log — it is the committed row state{RESET}")
+        print(f"  {DIM}at that instant. It answers: what was the agent authorised to do?{RESET}")
+
+        rule("confidence decay — memory that ages")
+        for f in mem.findings_with_confidence(limit=5):
+            bar = "█" * max(1, int(f["confidence"] * 20))
+            status_colour = RED if f["status"] == "regressed" else (
+                DIM if f["status"] == "fixed" else GREEN)
+            print(f"  {f['confidence']:.3f} {CYAN}{bar:<20}{RESET} "
+                  f"{status_colour}{f['status']:<9}{RESET} {f['title'][:44]}")
+
         rule("artifacts — bytes in S3, addresses in CockroachDB")
         print(f"  store: {mem.artifacts.backend}")
         with mem.conn.cursor() as cur:
@@ -132,6 +175,14 @@ def report(result) -> None:
     print(f"    deduped      : {AMBER}{result.deduped}{RESET}  {DIM}(blocked before write){RESET}")
     print(f"    scope denied : {result.denied}")
     print(f"    cost         : ${result.cost_usd:.4f}")
+    rec = result.reconciliation
+    if rec.confirmed or rec.fixed or rec.regressed:
+        parts = [f"{rec.confirmed} still present"]
+        if rec.fixed:
+            parts.append(f"{DIM}{rec.fixed} now fixed{RESET}")
+        if rec.regressed:
+            parts.append(f"{RED}{rec.regressed} REGRESSED{RESET}")
+        print(f"    reconciled   : " + ", ".join(parts))
     if result.halted:
         print(f"    {RED}{result.halt_reason}{RESET}")
 

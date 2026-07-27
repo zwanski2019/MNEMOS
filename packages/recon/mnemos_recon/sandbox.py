@@ -39,7 +39,24 @@ SCOPE_RULES: list[tuple[str, str, str]] = [
 ]
 
 
+# One third-party script, deployed by the same team to two different properties.
+# It is served from both estates byte-for-byte, which is what makes the correlation
+# in `MemoryIntelligence.correlations()` a real finding rather than a coincidence:
+# neither scan can know the file is shared, because each only ever sees one estate.
+SHARED_VENDOR_BUNDLE = """
+        const VENDOR_ANALYTICS = "https://cdn.vendor-analytics.test/v3/collect";
+        const STRIPE_PUBLISHABLE = "pk_live_51KxSampleSandboxKeyDoNotUse00";
+        navigator.sendBeacon(VENDOR_ANALYTICS, JSON.stringify(payload));
+        """
+
+
 PASS_ONE: list[SandboxAsset] = [
+    SandboxAsset(
+        host="cdn.sandbox.mnemos.test",
+        kind="js_bundle",
+        url="https://cdn.sandbox.mnemos.test/vendor-analytics.js",
+        body=SHARED_VENDOR_BUNDLE,
+    ),
     SandboxAsset(
         host="www.sandbox.mnemos.test",
         kind="js_bundle",
@@ -92,8 +109,48 @@ PASS_TWO_EXTRA: list[SandboxAsset] = [
 OUT_OF_SCOPE_PROBE = "admin.sandbox.mnemos.test"
 
 
+# ---------------------------------------------------------------------------
+# A second, separate estate.
+#
+# It exists so correlation has something true to find. `vendor-analytics.js` here
+# is byte-identical to a bundle on the first estate — the same third-party script
+# deployed by the same team to two different properties. Neither scan can know
+# that. Only memory, joining on the content address, can.
+# ---------------------------------------------------------------------------
+SECOND_ROOT_DOMAIN = "acme-labs.mnemos.test"
+
+SECOND_AUTHORISATION = (
+    "MNEMOS project-owned second sandbox corpus; offline fixture, no live hosts."
+)
+
+SECOND_SCOPE_RULES: list[tuple[str, str, str]] = [
+    ("*.acme-labs.mnemos.test", "allow", "Second owned sandbox estate"),
+    ("acme-labs.mnemos.test", "allow", "Apex of the second owned estate"),
+    ("payments.acme-labs.mnemos.test", "deny", "Cardholder scope — excluded by agreement"),
+]
+
+SECOND_ESTATE: list[SandboxAsset] = [
+    SandboxAsset(
+        host="www.acme-labs.mnemos.test",
+        kind="js_bundle",
+        url="https://www.acme-labs.mnemos.test/assets/vendor-analytics.js",
+        body=SHARED_VENDOR_BUNDLE,
+    ),
+    SandboxAsset(
+        host="docs.acme-labs.mnemos.test",
+        kind="url",
+        url="https://docs.acme-labs.mnemos.test/server-status",
+        body="Apache Server Status for docs.acme-labs.mnemos.test (via 10.9.1.4)",
+    ),
+]
+
+
 def pass_assets(pass_no: int) -> list[SandboxAsset]:
-    """What the scanner sees on visit `pass_no`."""
+    """What the scanner sees on visit `pass_no` to the first estate."""
     if pass_no <= 1:
         return list(PASS_ONE)
     return list(PASS_ONE) + list(PASS_TWO_EXTRA)
+
+
+def second_estate_assets() -> list[SandboxAsset]:
+    return list(SECOND_ESTATE)

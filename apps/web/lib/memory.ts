@@ -255,3 +255,176 @@ export async function getRepeatFindings(): Promise<Finding[] | null> {
       WHERE f.times_seen > 1 ORDER BY f.times_seen DESC LIMIT 10`,
   );
 }
+
+/* ------------------------------------------------------------------ *
+ * Memory intelligence — the reads that make this a memory layer
+ * rather than a findings table.
+ * ------------------------------------------------------------------ */
+
+/** Half-life must match packages/memory/mnemos_memory/intelligence.py. */
+const CONFIDENCE_HALF_LIFE_DAYS = 14;
+const MIN_CONFIDENCE = 0.05;
+
+export function confidenceFor(lastConfirmedAt: string | Date): number {
+  const then = new Date(lastConfirmedAt).getTime();
+  const ageDays = Math.max(0, (Date.now() - then) / 86_400_000);
+  const decayed = Math.pow(0.5, ageDays / CONFIDENCE_HALF_LIFE_DAYS);
+  return Math.max(MIN_CONFIDENCE, Number(decayed.toFixed(4)));
+}
+
+export type ScoredFinding = Finding & {
+  status: string;
+  regression_count: number;
+  last_confirmed_at: string;
+  confidence: number;
+};
+
+export async function getScoredFindings(limit = 100): Promise<ScoredFinding[] | null> {
+  const rows = await q<ScoredFinding>(
+    `SELECT f.id, f.title, f.severity, f.summary, f.times_seen, f.created_at,
+            f.status, f.regression_count, f.last_confirmed_at, t.root_domain
+       FROM findings f LEFT JOIN targets t ON t.id = f.target_id
+      ORDER BY f.last_confirmed_at DESC LIMIT $1`,
+    [limit],
+  );
+  return (
+    rows?.map((r) => ({
+      ...r,
+      times_seen: Number(r.times_seen),
+      regression_count: Number(r.regression_count),
+      confidence: confidenceFor(r.last_confirmed_at),
+    })) ?? null
+  );
+}
+
+export type Correlation = {
+  kind: "artifact" | "finding";
+  key: string;
+  targets: string[];
+  occurrences: number;
+  detail: string;
+};
+
+/**
+ * Things memory can see that no single scan can: the same bytes, or the same
+ * conclusion, reaching more than one estate.
+ */
+export async function getCorrelations(): Promise<Correlation[] | null> {
+  const artifacts = await q<{
+    sha256: string; n_targets: string; occurrences: string; domains: string[]; bytes: string;
+  }>(
+    `SELECT a.sha256, count(DISTINCT a.target_id) AS n_targets, count(*) AS occurrences,
+            array_agg(DISTINCT t.root_domain) AS domains, max(a.byte_len) AS bytes
+       FROM artifacts a JOIN targets t ON t.id = a.target_id
+      GROUP BY a.sha256 HAVING count(DISTINCT a.target_id) > 1
+      ORDER BY n_targets DESC LIMIT 20`,
+  );
+  const findings = await q<{
+    title: string; severity: string; n_targets: string; occurrences: string; domains: string[];
+  }>(
+    `SELECT f.title, f.severity, count(DISTINCT f.target_id) AS n_targets,
+            count(*) AS occurrences, array_agg(DISTINCT t.root_domain) AS domains
+       FROM findings f JOIN targets t ON t.id = f.target_id
+      GROUP BY f.title, f.severity HAVING count(DISTINCT f.target_id) > 1
+      ORDER BY n_targets DESC LIMIT 20`,
+  );
+  if (artifacts === null && findings === null) return null;
+
+  return [
+    ...(artifacts ?? []).map((a) => ({
+      kind: "artifact" as const,
+      key: a.sha256,
+      targets: (a.domains ?? []).filter(Boolean),
+      occurrences: Number(a.occurrences),
+      detail: `identical ${Number(a.bytes)}-byte artifact on ${a.n_targets} estates`,
+    })),
+    ...(findings ?? []).map((f) => ({
+      kind: "finding" as const,
+      key: f.title,
+      targets: (f.domains ?? []).filter(Boolean),
+      occurrences: Number(f.occurrences),
+      detail: `${f.severity} finding reached independently on ${f.n_targets} estates`,
+    })),
+  ];
+}
+
+export type Snapshot = Record<string, number>;
+
+/**
+ * Memory as it stood at a past instant, via CockroachDB AS OF SYSTEM TIME.
+ *
+ * The clause has to be top-level, so the reads run inside a transaction opened at
+ * that timestamp — which also guarantees every count comes from the same instant.
+ * Returns null when the timestamp is outside the cluster's GC window, which is a
+ * real answer rather than an error.
+ */
+export async function getSnapshotAt(minutesAgo: number): Promise<Snapshot | null> {
+  if (!MEMORY_CONFIGURED) return null;
+  const tables = [
+    "targets", "assets", "artifacts", "embeddings",
+    "findings", "agent_runs", "audit_log", "scope_decisions",
+  ];
+  const client = await pool().connect().catch(() => null);
+  if (!client) return null;
+  try {
+    await client.query(`BEGIN AS OF SYSTEM TIME '-${Math.round(minutesAgo)}m'`);
+    const out: Snapshot = {};
+    for (const t of tables) {
+      const r = await client.query(`SELECT count(*) AS n FROM ${t}`);
+      out[t] = Number(r.rows[0].n);
+    }
+    await client.query("COMMIT");
+    return out;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.warn("[mnemos] time travel rejected:", (err as Error).message);
+    return null;
+  } finally {
+    client.release();
+  }
+}
+
+/** Vector search over the distributed index — the memory layer, visibly at work. */
+export type RecallHit = {
+  kind: "embedding" | "finding";
+  content: string;
+  distance: number;
+};
+
+export async function recallByText(
+  queryText: string,
+  k = 8,
+): Promise<RecallHit[] | null> {
+  if (!queryText.trim()) return [];
+  // The web tier has no embedder (and must not have AWS credentials), so it
+  // searches on the stored text rather than re-embedding the query. The vector
+  // index still ranks: we pull the nearest neighbours of the best textual match.
+  const seed = await q<{ embedding: string }>(
+    `SELECT embedding::STRING AS embedding FROM embeddings
+      WHERE content ILIKE '%' || $1 || '%' LIMIT 1`,
+    [queryText.trim()],
+  );
+  if (seed === null) return null;
+  if (seed.length === 0) return [];
+
+  const vec = seed[0].embedding;
+  const emb = await q<{ content: string; distance: string }>(
+    `SELECT content, embedding <=> $1 AS distance FROM embeddings
+      ORDER BY embedding <=> $1 LIMIT $2`,
+    [vec, k],
+  );
+  const fnd = await q<{ content: string; distance: string }>(
+    `SELECT title || ' — ' || summary AS content, embedding <=> $1 AS distance
+       FROM findings ORDER BY embedding <=> $1 LIMIT $2`,
+    [vec, k],
+  );
+
+  return [
+    ...(emb ?? []).map((r) => ({
+      kind: "embedding" as const, content: r.content, distance: Number(r.distance),
+    })),
+    ...(fnd ?? []).map((r) => ({
+      kind: "finding" as const, content: r.content, distance: Number(r.distance),
+    })),
+  ].sort((a, b) => a.distance - b.distance);
+}

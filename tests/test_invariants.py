@@ -10,11 +10,13 @@ Requires a running CockroachDB (`make db-up`). Skipped otherwise.
 from __future__ import annotations
 
 import os
+import urllib.parse
 import uuid
 
 import pytest
 
 psycopg = pytest.importorskip("psycopg")
+from psycopg.rows import dict_row  # noqa: E402
 
 from mnemos_memory import (  # noqa: E402
     Candidate,
@@ -229,19 +231,43 @@ def test_every_decision_leaves_an_audit_row(mem, target):
     assert {"scope_check", "dedup", "write"} <= actions
 
 
+def _probe_dsn(user: str, password: str) -> str:
+    """Rewrite the DSN's credentials, whatever they currently are.
+
+    This used to be `DSN.replace("root@", ...)`, which quietly did nothing against a
+    CockroachDB Cloud DSN (the user there is not `root`). The probe then connected as
+    the admin, could of course write, and the test passed for entirely the wrong
+    reason — it was asserting nothing. Parse the URL instead.
+    """
+    parts = urllib.parse.urlsplit(DSN)
+    netloc = f"{user}:{urllib.parse.quote(password)}@{parts.hostname}"
+    if parts.port:
+        netloc += f":{parts.port}"
+    return urllib.parse.urlunsplit(
+        (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
+    )
+
+
 def test_append_only_ledgers_reject_update_and_delete():
     """Enforced by CockroachDB privileges (002_roles.sql), not by application code."""
-    admin = psycopg.connect(DSN, autocommit=True)
     user = f"invariant_probe_{uuid.uuid4().hex[:8]}"
+    password = uuid.uuid4().hex
+    admin = psycopg.connect(DSN, autocommit=True)
     try:
         with admin.cursor() as cur:
-            cur.execute(f"CREATE USER IF NOT EXISTS {user}")
+            cur.execute(f"CREATE USER IF NOT EXISTS {user} WITH PASSWORD %s", (password,))
             cur.execute(f"GRANT mnemos_agent TO {user}")
     finally:
         admin.close()
 
-    probe_dsn = DSN.replace("root@", f"{user}@")
-    conn = psycopg.connect(probe_dsn, autocommit=True)
+    probe_dsn = _probe_dsn(user, password)
+    conn = psycopg.connect(probe_dsn, autocommit=True, row_factory=dict_row)
+
+    # Guard against the previous failure mode: if the probe is somehow still the
+    # admin, the assertions below would pass vacuously.
+    with conn.cursor() as cur:
+        cur.execute("SELECT current_user AS who")
+        assert cur.fetchone()["who"] == user, "probe did not switch identity"
     try:
         with conn.cursor() as cur:
             with pytest.raises(psycopg.errors.InsufficientPrivilege):

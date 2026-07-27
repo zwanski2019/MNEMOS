@@ -20,6 +20,7 @@ import psycopg
 from .artifacts import ArtifactStore, get_artifact_store
 from .db import connect, transaction
 from .embeddings import EMBED_DIM, Embedder, get_embedder
+from .intelligence import MemoryIntelligence
 
 log = logging.getLogger(__name__)
 
@@ -79,8 +80,12 @@ def _vec_literal(vec: Sequence[float]) -> str:
     return "[" + ",".join(f"{v:.6f}" for v in vec) + "]"
 
 
-class Memory:
-    """Session-scoped handle on CockroachDB."""
+class Memory(MemoryIntelligence):
+    """Session-scoped handle on CockroachDB.
+
+    Hot-path operations (recall, dedup, scope, audit, cost) live here.
+    Higher-order analyses over the same tables come from MemoryIntelligence.
+    """
 
     def __init__(
         self,
@@ -311,7 +316,7 @@ class Memory:
             cur.execute(
                 "INSERT INTO artifacts (target_id, asset_id, sha256, s3_bucket, s3_key, byte_len, "
                 "content_type) VALUES (%s, %s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (sha256) DO UPDATE SET s3_bucket = excluded.s3_bucket, "
+                "ON CONFLICT (target_id, sha256) DO UPDATE SET s3_bucket = excluded.s3_bucket, "
                 "s3_key = excluded.s3_key RETURNING id",
                 (target_id, asset_id, sha, bucket, key, len(body), content_type),
             )
@@ -441,8 +446,8 @@ class Memory:
         if not verdict.novel:
             with transaction(self.conn) as cur:
                 cur.execute(
-                    "UPDATE findings SET times_seen = times_seen + 1, last_seen_run = %s "
-                    "WHERE id = %s",
+                    "UPDATE findings SET times_seen = times_seen + 1, last_seen_run = %s, "
+                    "last_confirmed_at = now() WHERE id = %s",
                     (run_id, verdict.existing_id),
                 )
                 self.audit("gateway", "write", "deny", run_id=run_id, target_id=target_id,
