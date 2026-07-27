@@ -14,10 +14,17 @@ from typing import Sequence
 
 from mnemos_memory import (
     Candidate,
+    Confusion,
     CostCeilingExceeded,
     Memory,
     Reconciliation,
     ScopeViolation,
+)
+from mnemos_memory.cognition import (
+    detect_ambiguous_scope,
+    detect_budget_without_coverage,
+    detect_contradiction,
+    propose_resolutions,
 )
 
 from .analyst import Analyst, Proposal, get_analyst
@@ -49,6 +56,9 @@ class CycleResult:
     denied: int = 0
     halted: bool = False
     halt_reason: str = ""
+    escalated: bool = False
+    escalation_id: str = ""
+    confusion_score: float = 0.0
     cost_usd: float = 0.0
     new_titles: list[str] = field(default_factory=list)
     reconciliation: Reconciliation = field(default_factory=Reconciliation)
@@ -162,6 +172,51 @@ def _cycle(
 
             observed_fingerprints.append(proposal.candidate.fingerprint())
 
+            # 5b. Is this conclusion coherent with what memory already believes?
+            #
+            # Checked before the write, because the point is to *not* write a
+            # finding the agent cannot stand behind. This never suppresses a
+            # finding on its own — it either passes, or the whole run stops and
+            # asks. Silently dropping a contradictory finding would be the worst
+            # of both worlds.
+            confusion = Confusion(signals=detect_contradiction(
+                proposed_severity=proposal.candidate.severity,
+                proposed_title=proposal.candidate.title,
+                priors=mem.similar_beliefs(
+                    target_id,
+                    f"{proposal.candidate.title}\n{proposal.candidate.summary}",
+                ),
+            ))
+
+            ambiguity = detect_ambiguous_scope(
+                proposal.candidate.host,
+                mem.matching_scope_rules(target_id, proposal.candidate.host),
+            )
+            if ambiguity:
+                confusion.signals.append(ambiguity)
+
+            budget = detect_budget_without_coverage(
+                spent_usd=result.cost_usd or _spend(mem, run_id),
+                ceiling_usd=ceiling_usd,
+                processed=len(observed_fingerprints),
+                total=len(observations),
+            )
+            if budget:
+                confusion.signals.append(budget)
+
+            if confusion.should_escalate:
+                confusion.proposals = propose_resolutions(confusion)
+                result.escalated = True
+                result.confusion_score = confusion.score
+                result.escalation_id = mem.escalate(
+                    run_id, target_id, confusion, resource=proposal.candidate.title
+                )
+                log.warning(
+                    "run %s escalated (confusion %.2f): %s",
+                    run_id, confusion.score, [s.name for s in confusion.signals],
+                )
+                break
+
             # 6. DEDUP, then scope, then write — all inside commit_finding.
             try:
                 finding_id = mem.commit_finding(target_id, proposal.candidate, run_id=run_id)
@@ -180,12 +235,31 @@ def _cycle(
         # 7. Reconcile — only on a complete pass. A halted run saw a partial view of
         # the estate, and marking live findings as "fixed" off a partial observation
         # set would be worse than not reconciling at all.
-        if completed:
+        if completed and not result.escalated:
             result.reconciliation = mem.reconcile(target_id, run_id, observed_fingerprints)
 
     finally:
-        summary = mem.finish_run(run_id, status="halted" if result.halted else "complete")
-        if summary:
-            result.cost_usd = float(summary.get("cost_usd") or 0)
+        if result.escalated:
+            # escalate() already set the status and finished_at. Marking it
+            # complete here would erase the distinction the whole feature exists
+            # to preserve.
+            with mem.conn.cursor() as cur:
+                cur.execute("SELECT cost_usd FROM agent_runs WHERE id = %s", (run_id,))
+                row = cur.fetchone()
+            result.cost_usd = float(row["cost_usd"]) if row else 0.0
+        else:
+            summary = mem.finish_run(
+                run_id, status="halted" if result.halted else "complete"
+            )
+            if summary:
+                result.cost_usd = float(summary.get("cost_usd") or 0)
 
     return result
+
+
+def _spend(mem: Memory, run_id: str) -> float:
+    """Committed spend for a run, read from the database rather than accumulated."""
+    with mem.conn.cursor() as cur:
+        cur.execute("SELECT cost_usd FROM agent_runs WHERE id = %s", (run_id,))
+        row = cur.fetchone()
+    return float(row["cost_usd"]) if row else 0.0

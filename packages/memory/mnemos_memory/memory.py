@@ -19,6 +19,13 @@ import psycopg
 
 from .artifacts import ArtifactStore, get_artifact_store
 from .db import connect, transaction
+from .cognition import (
+    Confusion,
+    detect_ambiguous_scope,
+    detect_budget_without_coverage,
+    detect_contradiction,
+    propose_resolutions,
+)
 from .embeddings import EMBED_DIM, Embedder, get_embedder
 from .epistemic import (
     FALSE_POSITIVE_RADIUS,
@@ -235,6 +242,99 @@ class Memory(MemoryIntelligence):
             detail={"matched": matched_allow} if matched_allow else {"rule": "no_allow_rule"},
         )
         return matched_allow is not None
+
+    def matching_scope_rules(self, target_id: str, host: str) -> list[dict[str, Any]]:
+        """Every rule that matches this host, not just the winning one.
+
+        `check_scope` answers allow/deny. This answers "what did the operator
+        actually write about this host", which is what makes conflicting rules
+        visible instead of silently resolved.
+        """
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pattern, effect, reason FROM scope_decisions "
+                    "WHERE target_id = %s ORDER BY decided_at ASC", (target_id,),
+                )
+                rules = cur.fetchall()
+        except Exception:
+            return []
+        return [
+            dict(r) for r in rules
+            if fnmatch.fnmatch(host.lower(), str(r["pattern"]).lower())
+        ]
+
+    def similar_beliefs(self, target_id: str, text: str, *, k: int = 5) -> list[dict[str, Any]]:
+        """Prior findings near `text`, carrying their epistemic status."""
+        vec = _vec_literal(self.embedder.embed(text))
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT f.id, f.title, f.severity, f.embedding <=> %s AS distance, "
+                "coalesce(s.status, 'hypothesis') AS status "
+                "FROM findings f LEFT JOIN finding_states s ON s.finding_id = f.id "
+                "WHERE f.target_id = %s ORDER BY f.embedding <=> %s LIMIT %s",
+                (vec, target_id, vec, k),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def escalate(
+        self, run_id: str, target_id: str, confusion: Confusion, *, resource: str = ""
+    ) -> str:
+        """Record an escalation and stop the run. This is a success state.
+
+        `agent_runs.status` becomes 'escalated', deliberately distinct from
+        'failed': the agent noticed it could not proceed honestly and said so.
+        A dashboard that paints this red trains people to suppress exactly the
+        signal that makes the system trustworthy.
+        """
+        proposals = confusion.proposals or propose_resolutions(confusion)
+        with transaction(self.conn) as cur:
+            cur.execute(
+                "INSERT INTO cognitive_states (run_id, target_id, confusion_score, "
+                "reasons, proposals) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (run_id, target_id, round(confusion.score, 5),
+                 json.dumps(confusion.as_reasons()),
+                 json.dumps([p.as_json() for p in proposals])),
+            )
+            state_id = str(cur.fetchone()["id"])
+            cur.execute(
+                "UPDATE agent_runs SET status = 'escalated', finished_at = now(), "
+                "halted_reason = %s WHERE id = %s",
+                (f"escalated: confusion {confusion.score:.2f}", run_id),
+            )
+            self.audit(
+                "gateway", "cognitive_escalation", "ok", run_id=run_id,
+                target_id=target_id, resource=resource,
+                detail={"cognitive_state_id": state_id,
+                        "confusion_score": round(confusion.score, 4),
+                        "signals": [s.name for s in confusion.signals],
+                        "proposals": [p.action for p in proposals]},
+                cur=cur,
+            )
+        return state_id
+
+    def open_escalations(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.id, c.run_id, c.confusion_score, c.reasons, c.proposals, "
+                "c.created_at, t.root_domain FROM cognitive_states c "
+                "LEFT JOIN targets t ON t.id = c.target_id "
+                "WHERE c.status = 'open' ORDER BY c.confusion_score DESC LIMIT %s",
+                (limit,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def resolve_escalation(
+        self, state_id: str, *, resolution: str, resolved_by: str | None = None
+    ) -> None:
+        with transaction(self.conn) as cur:
+            cur.execute(
+                "UPDATE cognitive_states SET status = 'resolved', resolution = %s, "
+                "resolved_by = %s, resolved_at = now() WHERE id = %s",
+                (resolution, resolved_by, state_id),
+            )
+            self.audit("operator", "escalation_resolved", "ok", resource=state_id,
+                       detail={"resolution": resolution}, cur=cur)
 
     def require_scope(self, target_id: str, host: str, *, run_id: str | None = None) -> None:
         if not self.check_scope(target_id, host, run_id=run_id):
