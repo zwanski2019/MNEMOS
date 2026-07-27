@@ -9,6 +9,7 @@ from .auth import (
     TRIAL_DAYS,
 )
 from .artifacts import ArtifactStore, get_artifact_store
+from .cognition import Confusion, ESCALATION_THRESHOLD, Signal
 from .db import connect, migrate, run_in_transaction, transaction
 from .epistemic import (
     Belief,
@@ -39,7 +40,7 @@ __all__ = [
     "Account", "Accounts", "ArtifactStore", "AuthError", "Entitlement", "NotEntitled",
     "TRIAL_DAYS", "get_artifact_store", "CONFIDENCE_HALF_LIFE_DAYS",
     "Correlation", "MemoryIntelligence", "Reconciliation", "confidence_for",
-    "Belief", "Candidate", "EpistemicStatus", "PriorLink", "bayes_update",
+    "Belief", "Candidate", "Confusion", "ESCALATION_THRESHOLD", "Signal", "EpistemicStatus", "PriorLink", "bayes_update",
     "derive_status", "initial_confidence", "CostCeilingExceeded", "DedupVerdict", "EMBED_DIM", "Embedder",
     "Memory", "Recalled", "ScopeViolation", "connect", "get_embedder", "migrate", "run_in_transaction",
     "transaction",
