@@ -11,6 +11,7 @@ import fnmatch
 import hashlib
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Iterable, Sequence
@@ -45,6 +46,11 @@ log = logging.getLogger(__name__)
 # Titan V2 is normalised, so distance is in [0, 2]; 0.12 is deliberately tight —
 # a false dedup silently hides a real finding, which is worse than a duplicate.
 DEDUP_DISTANCE = 0.12
+
+# Seeded by migration 008. Expired and revoked at creation, so it can be traced
+# in the audit trail but can never authorise a scan through authorise_scan().
+BOOTSTRAP_GRANT_ID = "00000000-0000-0000-0000-000000000003"
+BOOTSTRAP_RECEIPT_ID = "00000000-0000-0000-0000-000000000002"
 
 
 class ScopeViolation(RuntimeError):
@@ -344,13 +350,38 @@ class Memory(MemoryIntelligence):
     # runs + cost ceiling
     # ------------------------------------------------------------------
     def start_run(
-        self, target_id: str, *, pass_no: int = 1, ceiling_usd: float = 5.0, model: str = ""
+        self, target_id: str, *, pass_no: int = 1, ceiling_usd: float = 5.0,
+        model: str = "", grant_id: str | None = None, receipt_id: str | None = None,
     ) -> str:
+        """Open a run. Requires the authorisation that permits it.
+
+        `agent_runs.grant_id` and `receipt_id` are NOT NULL foreign keys, so a run
+        that cannot name its authorising grant is refused by CockroachDB. This
+        method cannot be made to bypass that — omitting the arguments produces a
+        NOT NULL violation, not a run with a blank grant.
+
+        `MNEMOS_BOOTSTRAP_GRANT` exists for the seeded sandbox, which has no human
+        operator. It points at a grant that is expired *and* revoked, so it can be
+        traced but can never satisfy `Accountability.authorise_scan`.
+        """
+        if grant_id is None or receipt_id is None:
+            bootstrap = os.getenv("MNEMOS_BOOTSTRAP_GRANT", "")
+            if not bootstrap:
+                raise ValueError(
+                    "start_run requires grant_id and receipt_id — a scan that cannot "
+                    "name its authorisation must not exist. Call "
+                    "Accountability.authorise_scan() first."
+                )
+            grant_id = grant_id or BOOTSTRAP_GRANT_ID
+            receipt_id = receipt_id or BOOTSTRAP_RECEIPT_ID
+
         with self.conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO agent_runs (target_id, pass_no, cost_ceiling_usd, model, embed_model) "
-                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-                (target_id, pass_no, ceiling_usd, model, self.embedder.model_id),
+                "INSERT INTO agent_runs (target_id, pass_no, cost_ceiling_usd, model, "
+                "embed_model, grant_id, receipt_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                (target_id, pass_no, ceiling_usd, model, self.embedder.model_id,
+                 grant_id, receipt_id),
             )
             run_id = str(cur.fetchone()["id"])
         self.audit("gateway", "run_start", "ok", run_id=run_id, target_id=target_id,
