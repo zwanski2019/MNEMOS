@@ -20,6 +20,16 @@ import psycopg
 from .artifacts import ArtifactStore, get_artifact_store
 from .db import connect, transaction
 from .embeddings import EMBED_DIM, Embedder, get_embedder
+from .epistemic import (
+    FALSE_POSITIVE_RADIUS,
+    Belief,
+    PriorLink,
+    apply_false_positive_memory,
+    derive_status,
+    initial_confidence,
+    on_recall,
+    on_reobservation,
+)
 from .intelligence import MemoryIntelligence
 
 log = logging.getLogger(__name__)
@@ -59,6 +69,12 @@ class Candidate:
     summary: str
     evidence: str = ""
     asset_id: str | None = None
+
+    # What kind of observation produced this, and how sure the analyst said it
+    # was. Both feed the initial confidence; both are optional so that callers
+    # that do not know default to the neutral prior rather than a flattering one.
+    source_kind: str = ""
+    analyst_certainty: float | None = None
 
     def fingerprint(self) -> str:
         """Cheap exact-duplicate gate, before we pay for a vector search."""
@@ -375,6 +391,14 @@ class Memory(MemoryIntelligence):
                 ))
 
         out.sort(key=lambda r: r.distance)
+
+        # Surfacing a finding is evidence that it is still salient, so the belief
+        # about it moves — weakly, and capped, because recall frequency correlates
+        # with a finding's own ranking and would otherwise be self-reinforcing.
+        for hit in out:
+            if hit.finding_id:
+                self._note_recall(hit.finding_id)
+
         if run_id:
             with self.conn.cursor() as cur:
                 cur.execute(
@@ -453,6 +477,12 @@ class Memory(MemoryIntelligence):
                 self.audit("gateway", "write", "deny", run_id=run_id, target_id=target_id,
                            resource=candidate.title,
                            detail={"reason": "duplicate", "of": verdict.existing_id}, cur=cur)
+            # A duplicate is not nothing: the scanner independently saw it again,
+            # which is the strongest corroboration this system produces. The row
+            # is not rewritten, but the belief about it is.
+            if verdict.existing_id:
+                self.corroborate(verdict.existing_id, source_kind=candidate.source_kind,
+                                 run_id=run_id)
             return None
 
         vec = _vec_literal(self.embedder.embed(f"{candidate.title}\n{candidate.summary}"))
@@ -471,7 +501,145 @@ class Memory(MemoryIntelligence):
             )
             self.audit("gateway", "write", "ok", run_id=run_id, target_id=target_id,
                        resource=candidate.title, detail={"finding_id": finding_id}, cur=cur)
+
+        # Belief is formed after the write, never before it. Nothing above this
+        # line consults epistemic state, so a confident-looking candidate cannot
+        # talk its way past the scope guard or the dedup gate.
+        self._seed_belief(target_id, finding_id, candidate, vec, run_id=run_id)
         return finding_id
+
+    # ------------------------------------------------------------------
+    # epistemic state — what we believe, and why
+    # ------------------------------------------------------------------
+    def _neighbours(
+        self, target_id: str, vec: str, *, radius: float, limit: int = 8,
+        exclude: str | None = None,
+    ) -> list[PriorLink]:
+        """Prior beliefs close enough to bear on a new one."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT f.id, f.embedding <=> %s AS distance, "
+                "coalesce(s.status, 'hypothesis') AS status "
+                "FROM findings f LEFT JOIN finding_states s ON s.finding_id = f.id "
+                "WHERE f.target_id = %s AND (%s::UUID IS NULL OR f.id != %s::UUID) "
+                "ORDER BY f.embedding <=> %s LIMIT %s",
+                (vec, target_id, exclude, exclude, vec, limit),
+            )
+            rows = cur.fetchall()
+        return [
+            PriorLink(str(r["id"]), 1.0 - float(r["distance"]), r["status"])
+            for r in rows
+            if float(r["distance"]) <= radius
+        ]
+
+    def _seed_belief(
+        self, target_id: str, finding_id: str, candidate: Candidate, vec: str,
+        *, run_id: str | None = None,
+    ) -> Belief:
+        """Compute and store the belief a newly written finding starts with."""
+        neighbours = self._neighbours(
+            target_id, vec, radius=FALSE_POSITIVE_RADIUS, exclude=finding_id
+        )
+        corroborating = [n for n in neighbours if n.status not in ("false_positive",)]
+
+        confidence = initial_confidence(
+            source_kind=candidate.source_kind,
+            analyst_certainty=candidate.analyst_certainty,
+            corroborating_priors=len(corroborating),
+        )
+        confidence, poisoned_by = apply_false_positive_memory(confidence, neighbours)
+
+        chain = [p.as_json() for p in poisoned_by]
+        # Record what we leaned on even when nothing poisoned it, so a score can
+        # always be explained rather than merely reported.
+        chain += [
+            PriorLink(n.finding_id, n.similarity, n.status,
+                      effect="counted as corroborating prior").as_json()
+            for n in corroborating[:3]
+        ]
+
+        status: str = "hypothesis" if poisoned_by else derive_status(confidence, 1)
+        belief = Belief(confidence, 1, status, chain)  # type: ignore[arg-type]
+
+        with transaction(self.conn) as cur:
+            cur.execute(
+                "INSERT INTO finding_states (finding_id, confidence, evidence_count, status, "
+                "epistemic_chain) VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (finding_id) DO NOTHING",
+                (finding_id, round(belief.confidence, 5), belief.evidence_count,
+                 belief.status, json.dumps(belief.chain)),
+            )
+            self.audit(
+                "gateway", "belief_seed", "ok", run_id=run_id, target_id=target_id,
+                resource=candidate.title,
+                detail={"finding_id": finding_id, "confidence": round(belief.confidence, 4),
+                        "status": belief.status, "poisoned_by": len(poisoned_by),
+                        "corroborating_priors": len(corroborating)},
+                cur=cur,
+            )
+        return belief
+
+    def belief(self, finding_id: str) -> Belief | None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT confidence, evidence_count, status, epistemic_chain "
+                "FROM finding_states WHERE finding_id = %s", (finding_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return Belief(float(row["confidence"]), int(row["evidence_count"]),
+                      row["status"], list(row["epistemic_chain"] or []))
+
+    def _store_belief(self, finding_id: str, belief: Belief) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "UPDATE finding_states SET confidence = %s, evidence_count = %s, "
+                "status = %s, updated_at = now() WHERE finding_id = %s",
+                (round(belief.confidence, 5), belief.evidence_count, belief.status,
+                 finding_id),
+            )
+
+    def _note_recall(self, finding_id: str) -> None:
+        """Weak, capped evidence from having been recalled. Never raises."""
+        try:
+            current = self.belief(finding_id)
+            if current is None:
+                return
+            self._store_belief(finding_id, on_recall(current))
+        except Exception as exc:  # pragma: no cover - belief updates are not critical
+            log.warning("recall belief update failed for %s: %s", finding_id, exc)
+
+    def corroborate(
+        self, finding_id: str, *, source_kind: str = "", run_id: str | None = None
+    ) -> Belief | None:
+        """The scanner saw it again. Strongest evidence the system produces."""
+        current = self.belief(finding_id)
+        if current is None:
+            return None
+        updated = on_reobservation(current, source_kind=source_kind)
+        self._store_belief(finding_id, updated)
+        self.audit("gateway", "belief_update", "ok", run_id=run_id, resource=finding_id,
+                   detail={"reason": "reobserved", "from": round(current.confidence, 4),
+                           "to": round(updated.confidence, 4), "status": updated.status})
+        return updated
+
+    def mark_false_positive(self, finding_id: str, *, reason: str = "") -> Belief | None:
+        """An operator ruled this wrong. Sticky — recomputation must not undo it.
+
+        This is what makes the rest of the layer worth having: the next time
+        something similar shows up on this target, it starts at a third of the
+        confidence instead of being re-reported at full volume.
+        """
+        current = self.belief(finding_id)
+        if current is None:
+            return None
+        updated = Belief(min(current.confidence, 0.1), current.evidence_count + 1,
+                         "false_positive", current.chain)
+        self._store_belief(finding_id, updated)
+        self.audit("operator", "belief_update", "ok", resource=finding_id,
+                   detail={"reason": "marked_false_positive", "note": reason})
+        return updated
 
     # ------------------------------------------------------------------
     # read models for the UI
