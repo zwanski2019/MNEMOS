@@ -1,96 +1,105 @@
 import { Icon } from "@/components/Icon";
 import { TopAppBar } from "@/components/TopAppBar";
+import { MemoryUnavailable, NoRowsYet } from "@/components/Empty";
+import { getScope } from "@/lib/memory";
 
-const RULES = [
-  { effect: "allow", pattern: "^api\\.sandbox-alpha\\.test/v[1-3]/.*$", reason: "Core API discovery scope", ts: "2026-07-04T08:12Z" },
-  { effect: "deny", pattern: ".*\\.admin\\.sandbox-alpha\\.test.*", reason: "OOB admin exclusion", ts: "2026-07-04T08:15Z" },
-  { effect: "allow", pattern: "10.42.0.0/16", reason: "Primary staging subnet", ts: "2026-07-04T08:22Z" },
-  { effect: "deny", pattern: "10.42.0.1", reason: "Staging gateway exclusion", ts: "2026-07-04T08:23Z" },
-] as const;
+export const dynamic = "force-dynamic";
 
-export default function ScopePage() {
+export default async function ScopePage() {
+  const rules = await getScope();
+  const allows = rules?.filter((r) => r.effect === "allow").length ?? 0;
+  const denies = rules?.filter((r) => r.effect === "deny").length ?? 0;
+
   return (
     <>
-      <TopAppBar subtitle="Scope Ledger" />
-      <main className="flex-1 overflow-y-auto p-gutter bg-pattern flex flex-col gap-gutter">
-        <div className="w-full bg-error-container/20 border border-error/50 rounded p-4 flex items-start gap-4">
-          <Icon name="gpp_bad" filled className="text-error mt-0.5" />
-          <div>
-            <h2 className="font-headline-md text-headline-md text-error mb-1">Deny by default — no allow rule, no action.</h2>
-            <p className="font-body-sm text-body-sm text-on-surface-variant">
-              The MNEMOS gateway enforces an implicit deny-all policy. Any host, endpoint, or subnet that does not match an
-              active ALLOW rule is rejected at the boundary. Every decision — allow or deny — is written to the audit log.
+      <TopAppBar subtitle="/ Scope" />
+      <div className="flex-1 overflow-y-auto p-gutter">
+        <div className="max-w-[2560px] mx-auto space-y-gutter">
+          <div className="bg-level-1 border border-level-2 rounded shadow overflow-hidden">
+            <div className="border-b border-level-2 px-panel_padding py-3 flex justify-between items-center bg-surface-container-low">
+              <h2 className="font-headline-md text-headline-md text-on-surface flex items-center gap-2">
+                <Icon name="policy" className="text-primary text-sm" />
+                Scope Ledger
+              </h2>
+              <span className="text-[10px] font-data-mono text-outline border border-outline-variant px-1 rounded bg-surface">
+                {rules ? `${allows} allow · ${denies} deny` : "unreachable"}
+              </span>
+            </div>
+
+            {!rules ? (
+              <MemoryUnavailable what="scope decisions" />
+            ) : rules.length === 0 ? (
+              <NoRowsYet
+                what="scope rules"
+                hint="With no allow rule the agent can do nothing at all — that is the point."
+              />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full font-data-mono text-data-mono">
+                  <thead className="bg-surface-container-low text-on-surface-variant">
+                    <tr className="text-left uppercase text-[10px] tracking-widest">
+                      <th className="px-4 py-2 font-label-caps">Effect</th>
+                      <th className="px-4 py-2 font-label-caps">Pattern</th>
+                      <th className="px-4 py-2 font-label-caps">Target</th>
+                      <th className="px-4 py-2 font-label-caps">Reason</th>
+                      <th className="px-4 py-2 font-label-caps">Decided by</th>
+                      <th className="px-4 py-2 font-label-caps">Decided at</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rules.map((r) => (
+                      <tr key={r.id} className="border-t border-level-2 hover:bg-level-0">
+                        <td className="px-4 py-2 whitespace-nowrap">
+                          <span
+                            className={`border px-1.5 py-0.5 rounded text-[10px] uppercase ${
+                              r.effect === "deny"
+                                ? "text-error border-error"
+                                : "text-primary border-primary-container"
+                            }`}
+                          >
+                            {r.effect}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 text-on-surface font-data-mono-bold">
+                          {r.pattern}
+                        </td>
+                        <td className="px-4 py-2 text-on-surface-variant">
+                          {r.root_domain ?? "—"}
+                        </td>
+                        <td className="px-4 py-2 text-on-surface-variant">{r.reason}</td>
+                        <td className="px-4 py-2 text-outline">{r.decided_by}</td>
+                        <td className="px-4 py-2 text-outline whitespace-nowrap">
+                          {new Date(r.decided_at).toISOString().replace("T", " ").slice(0, 19)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-level-1 border border-level-2 rounded shadow p-panel_padding font-data-mono text-data-mono text-on-surface-variant space-y-2">
+            <p>
+              <span className="text-primary">Deny by default.</span> A host with no
+              matching allow rule is refused. An explicit deny always beats a wildcard
+              allow.
+            </p>
+            <p>
+              <span className="text-primary">Append only.</span> This table is a ledger,
+              not a config file. A scope change is a new row, never a mutation, so
+              &ldquo;what were we allowed to do at 14:02?&rdquo; stays answerable. The
+              application role has <span className="text-primary">SELECT, INSERT</span>{" "}
+              on it and nothing else — CockroachDB rejects an UPDATE or DELETE outright.
+            </p>
+            <p>
+              <span className="text-primary">Fail closed.</span> If this table cannot be
+              read, the guard answers &ldquo;deny&rdquo;. A recon agent that assumes yes
+              when its memory is down is a liability.
             </p>
           </div>
         </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-gutter flex-1">
-          {/* Ledger */}
-          <div className="lg:col-span-2 bg-surface-container-low border border-outline-variant rounded flex flex-col overflow-hidden shadow-xl shadow-black/50">
-            <div className="p-panel_padding border-b border-outline-variant flex justify-between items-center bg-surface-container">
-              <div className="flex items-center gap-2">
-                <Icon name="list_alt" className="text-on-surface-variant" />
-                <h3 className="font-data-mono-bold text-data-mono-bold text-on-surface uppercase tracking-wider">Immutable Ruleset</h3>
-              </div>
-              <span className="px-2 py-1 text-[10px] font-data-mono bg-surface-bright border border-outline-variant text-on-surface-variant rounded">TARGET: SANDBOX-ALPHA</span>
-            </div>
-            <div className="flex-1 overflow-y-auto p-2 space-y-tight_stack">
-              <div className="grid grid-cols-12 gap-2 px-3 py-2 font-label-caps text-label-caps text-on-surface-variant border-b border-outline-variant/50 sticky top-0 bg-surface-container-low z-10">
-                <div className="col-span-2">VERDICT</div>
-                <div className="col-span-4">PATTERN (REGEX/CIDR)</div>
-                <div className="col-span-4">JUSTIFICATION</div>
-                <div className="col-span-2 text-right">TIMESTAMP</div>
-              </div>
-              {RULES.map((r, i) => (
-                <div
-                  key={i}
-                  className={
-                    "grid grid-cols-12 gap-2 px-3 py-2 items-center font-data-mono text-data-mono border-l-2 border-l-transparent transition-all " +
-                    (r.effect === "allow" ? "bg-surface-container hover:border-l-primary" : "bg-surface hover:border-l-error")
-                  }
-                >
-                  <div className="col-span-2">
-                    <span className={"px-2 py-0.5 rounded text-[11px] font-bold uppercase " + (r.effect === "allow" ? "bg-primary/10 text-primary border border-primary/20" : "bg-error/10 text-error border border-error/20")}>{r.effect}</span>
-                  </div>
-                  <div className="col-span-4 text-on-surface truncate" title={r.pattern}>{r.pattern}</div>
-                  <div className="col-span-4 text-on-surface-variant text-[11px] truncate">{r.reason}</div>
-                  <div className="col-span-2 text-right text-on-surface-variant text-[11px]">{r.ts}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Live evaluator */}
-          <div className="bg-surface-container-low border border-outline-variant rounded flex flex-col shadow-xl shadow-black/50">
-            <div className="p-panel_padding border-b border-outline-variant flex items-center gap-2 bg-surface-container">
-              <Icon name="terminal" className="text-primary" />
-              <h3 className="font-data-mono-bold text-data-mono-bold text-on-surface uppercase tracking-wider">Live Evaluator</h3>
-            </div>
-            <div className="p-panel_padding flex flex-col gap-6 flex-1">
-              <label className="block">
-                <span className="font-label-caps text-label-caps text-on-surface-variant mb-2 block">TEST HOST / IP / URI</span>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-primary font-data-mono">&gt;</span>
-                  <input className="w-full bg-surface border border-outline-variant text-on-surface font-data-mono text-data-mono p-2 pl-8 rounded focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none transition-all" defaultValue="api.sandbox-alpha.test/v2/users" />
-                </div>
-              </label>
-              <div className="flex-1 bg-surface border border-outline-variant rounded p-4 flex flex-col justify-center items-center relative overflow-hidden">
-                <Icon name="policy" className="absolute text-[120px] opacity-5 pointer-events-none" />
-                <div className="z-10 flex flex-col items-center text-center">
-                  <div className="w-16 h-16 rounded-full bg-primary/10 border-2 border-primary flex items-center justify-center mb-4">
-                    <Icon name="check_circle" filled className="text-primary text-3xl" />
-                  </div>
-                  <h4 className="font-display-id text-display-id text-primary mb-1">ALLOWED</h4>
-                  <p className="font-data-mono text-data-mono text-on-surface-variant text-[11px]">Matched: ^api\.sandbox-alpha\.test/v[1-3]/.*$</p>
-                </div>
-              </div>
-              <div className="text-[10px] font-data-mono text-on-surface-variant text-center opacity-70">
-                Evaluation latency: 1.2ms · fail-closed
-              </div>
-            </div>
-          </div>
-        </div>
-      </main>
+      </div>
     </>
   );
 }
