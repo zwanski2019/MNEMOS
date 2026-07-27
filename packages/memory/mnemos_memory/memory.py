@@ -17,6 +17,7 @@ from typing import Any, Iterable, Sequence
 
 import psycopg
 
+from .artifacts import ArtifactStore, get_artifact_store
 from .db import connect, transaction
 from .embeddings import EMBED_DIM, Embedder, get_embedder
 
@@ -81,9 +82,15 @@ def _vec_literal(vec: Sequence[float]) -> str:
 class Memory:
     """Session-scoped handle on CockroachDB."""
 
-    def __init__(self, conn: psycopg.Connection | None = None, embedder: Embedder | None = None):
+    def __init__(
+        self,
+        conn: psycopg.Connection | None = None,
+        embedder: Embedder | None = None,
+        artifacts: ArtifactStore | None = None,
+    ):
         self.conn = conn or connect()
         self.embedder = embedder or get_embedder()
+        self.artifacts = artifacts or get_artifact_store()
 
     def close(self) -> None:
         self.conn.close()
@@ -290,17 +297,23 @@ class Memory:
 
     def record_artifact(
         self, target_id: str, asset_id: str | None, body: bytes,
-        *, s3_bucket: str | None = None, s3_key: str | None = None,
-        content_type: str = "text/plain",
+        *, content_type: str = "text/plain",
     ) -> str:
-        """Store the content address. The bytes themselves belong in S3."""
+        """Upload the bytes to S3 and record the content address in CockroachDB.
+
+        The upload happens first: if S3 rejects it we must not end up with a row
+        claiming an object that is not there. Both sides are keyed on the same
+        sha256, so a retry is idempotent on both.
+        """
         sha = hashlib.sha256(body).hexdigest()
+        bucket, key = self.artifacts.put(sha, body, content_type)
         with self.conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO artifacts (target_id, asset_id, sha256, s3_bucket, s3_key, byte_len, "
                 "content_type) VALUES (%s, %s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (sha256) DO UPDATE SET sha256 = excluded.sha256 RETURNING id",
-                (target_id, asset_id, sha, s3_bucket, s3_key or f"artifacts/{sha}", len(body), content_type),
+                "ON CONFLICT (sha256) DO UPDATE SET s3_bucket = excluded.s3_bucket, "
+                "s3_key = excluded.s3_key RETURNING id",
+                (target_id, asset_id, sha, bucket, key, len(body), content_type),
             )
             return str(cur.fetchone()["id"])
 

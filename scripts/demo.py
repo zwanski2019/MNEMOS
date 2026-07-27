@@ -60,9 +60,10 @@ def main() -> int:
     print(f"  embedder           : {embedder.model_id}")
     print(f"  analyst            : {analyst.model_id}")
     if embedder.model_id.startswith("offline"):
-        print(f"  {AMBER}note{RESET} no AWS credentials found — running with offline stand-ins.")
-        print(f"       {DIM}set AWS creds + MNEMOS_EMBEDDER=bedrock MNEMOS_ANALYST=bedrock "
-              f"for Titan V2 + Claude.{RESET}")
+        print(f"  {AMBER}note{RESET} running with offline stand-ins for embed/reason.")
+        print(f"       {DIM}Bedrock was probed and is not invokable on this account "
+              f"(on-demand quota).{RESET}")
+        print(f"       {DIM}Artifact storage below is real Amazon S3 regardless.{RESET}")
 
     with Memory(embedder=embedder) as mem:
         target_id = ensure_target(mem)
@@ -79,6 +80,16 @@ def main() -> int:
         rule("what CockroachDB actually holds")
         for table, count in mem.stats().items():
             print(f"  {table:<16} {count:>6}")
+
+        rule("artifacts — bytes in S3, addresses in CockroachDB")
+        print(f"  store: {mem.artifacts.backend}")
+        with mem.conn.cursor() as cur:
+            cur.execute(
+                "SELECT sha256, s3_bucket, s3_key, byte_len FROM artifacts ORDER BY byte_len DESC"
+            )
+            for row in cur.fetchall():
+                where = f"s3://{row['s3_bucket']}/" if row["s3_bucket"] else f"{DIM}(not uploaded){RESET} "
+                print(f"  {row['sha256'][:12]}…  {row['byte_len']:>5}B  {where}{row['s3_key']}")
 
         rule("recall, straight out of the vector index")
         for item in mem.recall(target_id, "leaked API key in a javascript bundle", k=4):

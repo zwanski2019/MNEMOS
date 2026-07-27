@@ -157,13 +157,23 @@ def get_embedder(force: str | None = None) -> Embedder:
 
     if aws_credentials_usable():
         try:
-            return BedrockTitanEmbedder()
-        except Exception as exc:  # pragma: no cover - depends on local AWS config
-            log.warning("Bedrock embedder unavailable (%s); using offline embedder", exc)
+            embedder = BedrockTitanEmbedder()
+            # Valid credentials are not the same as a usable model. A fresh AWS
+            # account has Bedrock on-demand quotas of zero and throttles the first
+            # invoke, so probe the model itself rather than discovering this
+            # halfway through a run.
+            embedder.embed("mnemos readiness probe")
+            return embedder
+        except Exception as exc:  # pragma: no cover - depends on account quota
+            log.warning(
+                "Bedrock reachable but %s is not invokable (%s); using offline embedder",
+                TITAN_MODEL_ID, type(exc).__name__,
+            )
 
     log.warning(
-        "No AWS credentials found — using %s. Vectors are deterministic but not "
-        "semantic. Set AWS credentials and MNEMOS_EMBEDDER=bedrock for the real thing.",
+        "Falling back to %s. Vectors are deterministic but NOT semantic, so recall "
+        "quality is degraded; dedup still works because it is exact-first. Set "
+        "MNEMOS_EMBEDDER=bedrock once Bedrock is invokable to get Titan V2.",
         HashingEmbedder.model_id,
     )
     return HashingEmbedder()

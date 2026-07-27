@@ -193,9 +193,19 @@ def get_analyst(force: str | None = None) -> Analyst:
     # degrade to the offline analyst rather than failing on the first observation.
     if aws_credentials_usable():
         try:
-            return BedrockAnalyst()
-        except Exception as exc:  # pragma: no cover
-            log.warning("Bedrock analyst unavailable (%s)", exc)
+            analyst = BedrockAnalyst()
+            # Same reasoning as the embedder: probe the model, not the credentials.
+            # A zero on-demand quota throttles the first real call, and discovering
+            # that on observation #1 of a live run is worse than discovering it here.
+            analyst.propose(
+                Observation("probe.invalid", "endpoint", "readiness probe", "info", ""), []
+            )
+            return analyst
+        except Exception as exc:  # pragma: no cover - depends on account quota
+            log.warning(
+                "Bedrock reachable but %s is not invokable (%s); using offline analyst",
+                DEFAULT_MODEL, type(exc).__name__,
+            )
 
-    log.warning("No usable AWS credentials — using %s", OfflineAnalyst.model_id)
+    log.warning("No usable Bedrock analyst — using %s", OfflineAnalyst.model_id)
     return OfflineAnalyst()
