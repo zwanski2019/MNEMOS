@@ -46,13 +46,21 @@ already written — recall from CockroachDB, not state held in this process.
 Every number there is read back **out of CockroachDB** after the run. Nothing is
 accumulated in process memory, because the database *is* the agent's memory.
 
-No AWS account? The demo still runs — it falls back to a clearly-labelled offline
-embedder and analyst, and says so. With credentials it uses Bedrock Titan V2 + Claude:
+### Against CockroachDB Cloud
+
+The same command runs unchanged against a real cluster — only `DATABASE_URL` differs:
 
 ```bash
-export DATABASE_URL='postgresql://…@…cockroachlabs.cloud:26257/mnemos?sslmode=verify-full'
-make demo-cloud   # MNEMOS_EMBEDDER=bedrock MNEMOS_ANALYST=bedrock
+export DATABASE_URL='postgresql://user:pw@your-cluster.aws-eu-central-1.cockroachlabs.cloud:26257/mnemos?sslmode=verify-full'
+make demo-cloud
 ```
+
+Verified on **CockroachDB Cloud Basic, v26.2.1, AWS eu-central-1**: both migrations
+apply, `embeddings_vec` and `findings_vec` are created as distributed vector indexes,
+the append-only grants hold, and the full two-pass cycle completes in ~55s.
+
+No AWS account? The demo still runs — it falls back to a clearly-labelled offline
+embedder and analyst and says so, rather than failing halfway through a run.
 
 ---
 
