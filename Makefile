@@ -62,8 +62,13 @@ demo-cloud:
 gateway:
 	$(PY) -m uvicorn mnemos_gateway.app:app --host 0.0.0.0 --port 8080
 
+# Tests create and destroy fixture targets, so they must never run against a
+# cluster whose data anyone will look at. Pointing DATABASE_URL at CockroachDB
+# Cloud once left ~80 throwaway targets in the live demo. The default is pinned
+# to the local cluster; override deliberately if you really mean it.
 test:
-	$(PY) -m pytest tests/ -q
+	DATABASE_URL="$${MNEMOS_TEST_DATABASE_URL:-postgresql://root@localhost:26257/mnemos?sslmode=disable}" \
+		$(PY) -m pytest tests/ -q
 
 verify-invariants:
 	$(PY) -m pytest tests/test_invariants.py -q -k "append_only or fails_closed or ceiling"
