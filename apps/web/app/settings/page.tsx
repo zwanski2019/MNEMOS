@@ -1,5 +1,8 @@
 import { TopAppBar } from "@/components/TopAppBar";
 
+// The status pill reads live memory, so this page cannot be prerendered.
+export const dynamic = "force-dynamic";
+
 export default function SettingsPage() {
   return (
     <>
