@@ -17,14 +17,18 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from mnemos_memory import (
+    Account,
+    Accounts,
+    AuthError,
     Candidate,
     CostCeilingExceeded,
     Memory,
+    NotEntitled,
     ScopeViolation,
     migrate,
 )
@@ -97,6 +101,52 @@ def get_memory() -> Memory:
         mem.close()
 
 
+# ---------------------------------------------------------------------------
+# authentication and entitlement
+#
+# Reads are deliberately open. The console is the funnel, and a recon dashboard
+# nobody can look at persuades nobody — so `GET` needs no token, forever.
+# Writes are gated, because a scan spends real money (Bedrock tokens, S3 storage,
+# cluster RUs) and touches someone else's infrastructure.
+# ---------------------------------------------------------------------------
+def _bearer(authorization: str | None) -> str:
+    if not authorization:
+        return ""
+    scheme, _, token = authorization.partition(" ")
+    return token.strip() if scheme.lower() == "bearer" else ""
+
+
+def current_account(
+    authorization: str | None = Header(default=None),
+    mem: Memory = Depends(get_memory),
+) -> Account:
+    """Resolve the caller, or 401. Required on every write path."""
+    account = Accounts(mem.conn).account_for_token(_bearer(authorization))
+    if account is None:
+        raise HTTPException(
+            status_code=401,
+            detail="sign in to act on memory — reading it stays free",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return account
+
+
+def entitled_account(
+    account: Account = Depends(current_account),
+    mem: Memory = Depends(get_memory),
+) -> Account:
+    """Resolve the caller and check they may still write. 402 when the trial ended.
+
+    402 rather than 403: this is not "you are forbidden", it is "this costs money
+    now", and a client can act on that distinction.
+    """
+    try:
+        Accounts(mem.conn).require_write(account.id)
+    except NotEntitled as exc:
+        raise HTTPException(status_code=402, detail=str(exc)) from exc
+    return account
+
+
 @app.get("/health")
 def health(mem: Memory = Depends(get_memory)) -> dict[str, Any]:
     """Liveness plus a real query, so a dead database fails the check."""
@@ -111,7 +161,11 @@ def health(mem: Memory = Depends(get_memory)) -> dict[str, Any]:
 # writes — the guarded paths
 # ---------------------------------------------------------------------------
 @app.post("/targets", status_code=201)
-def create_target(body: TargetIn, mem: Memory = Depends(get_memory)) -> dict[str, str]:
+def create_target(
+    body: TargetIn,
+    mem: Memory = Depends(get_memory),
+    account: Account = Depends(entitled_account),
+) -> dict[str, str]:
     try:
         target_id = mem.create_target(
             name=body.name,
@@ -128,6 +182,7 @@ def create_target(body: TargetIn, mem: Memory = Depends(get_memory)) -> dict[str
 def start_run(
     target_id: str, pass_no: int = 1, ceiling_usd: float = 5.0,
     mem: Memory = Depends(get_memory),
+    account: Account = Depends(entitled_account),
 ) -> dict[str, str]:
     return {"run_id": mem.start_run(target_id, pass_no=pass_no, ceiling_usd=ceiling_usd)}
 
@@ -139,7 +194,12 @@ def check_scope(body: ScopeQuery, mem: Memory = Depends(get_memory)) -> dict[str
 
 
 @app.post("/findings", status_code=201)
-def propose_finding(body: FindingIn, response: Response, mem: Memory = Depends(get_memory)) -> dict[str, Any]:
+def propose_finding(
+    body: FindingIn,
+    response: Response,
+    mem: Memory = Depends(get_memory),
+    account: Account = Depends(entitled_account),
+) -> dict[str, Any]:
     """Propose a finding. The gateway decides whether it survives.
 
     409 means memory already knew — that is a success for the system, and the
@@ -197,3 +257,77 @@ def audit(limit: int = 100, mem: Memory = Depends(get_memory)) -> list[dict[str,
 @app.get("/stats")
 def stats(mem: Memory = Depends(get_memory)) -> dict[str, int]:
     return mem.stats()
+
+
+# ---------------------------------------------------------------------------
+# accounts
+# ---------------------------------------------------------------------------
+class SignUpIn(BaseModel):
+    email: str
+    password: str = Field(..., min_length=10)
+    display_name: str | None = None
+
+
+class LogInIn(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/auth/signup", status_code=201)
+def sign_up(body: SignUpIn, mem: Memory = Depends(get_memory)) -> dict[str, Any]:
+    """Create an account and start the free trial."""
+    accounts = Accounts(mem.conn)
+    try:
+        account = accounts.sign_up(body.email, body.password, body.display_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    token = accounts.log_in(body.email, body.password)
+    ent = accounts.entitlement(account.id)
+    return {
+        "token": token,
+        "account": {"id": account.id, "email": account.email},
+        "trial_days_left": ent.days_left,
+    }
+
+
+@app.post("/auth/login")
+def log_in(body: LogInIn, mem: Memory = Depends(get_memory)) -> dict[str, Any]:
+    accounts = Accounts(mem.conn)
+    try:
+        token = accounts.log_in(body.email, body.password)
+    except AuthError as exc:
+        # One shape of failure, so this cannot be used to enumerate accounts.
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    account = accounts.account_for_token(token)
+    assert account is not None
+    ent = accounts.entitlement(account.id)
+    return {
+        "token": token,
+        "account": {"id": account.id, "email": account.email},
+        "plan": ent.plan,
+        "can_write": ent.can_write,
+        "trial_days_left": ent.days_left,
+    }
+
+
+@app.post("/auth/logout", status_code=204)
+def log_out(
+    authorization: str | None = Header(default=None), mem: Memory = Depends(get_memory)
+) -> None:
+    Accounts(mem.conn).log_out(_bearer(authorization))
+
+
+@app.get("/auth/me")
+def me(
+    account: Account = Depends(current_account), mem: Memory = Depends(get_memory)
+) -> dict[str, Any]:
+    ent = Accounts(mem.conn).entitlement(account.id)
+    return {
+        "account": {"id": account.id, "email": account.email,
+                    "display_name": account.display_name},
+        "plan": ent.plan,
+        "status": ent.status,
+        "can_write": ent.can_write,
+        "trial_days_left": ent.days_left,
+        "trial_ends_at": ent.trial_ends_at.isoformat() if ent.trial_ends_at else None,
+    }

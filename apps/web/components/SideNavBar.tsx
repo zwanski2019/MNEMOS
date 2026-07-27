@@ -9,7 +9,11 @@ type NavItem = { href: string; icon: string; label: string };
 const NAV: NavItem[] = [
   { href: "/", icon: "dashboard", label: "Overview" },
   { href: "/targets", icon: "target", label: "Targets" },
-  { href: "/runs", icon: "play_circle", label: "Live Runs" },
+  // Single word, deliberately. Every label in this rail must fit one line: a
+  // two-word label wraps, that item becomes taller than its neighbours, and the
+  // whole column below it falls off the shared rhythm. "Live Runs" was the only
+  // offender, and it read as a misalignment bug because it was one.
+  { href: "/runs", icon: "play_circle", label: "Runs" },
   { href: "/findings", icon: "search_check", label: "Findings" },
   { href: "/memory", icon: "database", label: "Memory" },
   { href: "/intelligence", icon: "lightbulb", label: "Intel" },
@@ -52,7 +56,12 @@ export function SideNavBar() {
               }
             >
               <Icon name={item.icon} filled={active} className="text-[22px]" />
-              <span className="font-label-caps text-label-caps mt-1 hidden lg:block text-[9px] uppercase">
+              {/*
+                nowrap is the guard, not the fix. Renaming the one offending label
+                solved today's break; this stops a future label from silently
+                reintroducing it by wrapping inside a 72px rail.
+              */}
+              <span className="font-label-caps mt-1 hidden lg:block text-[9px] uppercase whitespace-nowrap">
                 {item.label}
               </span>
             </Link>

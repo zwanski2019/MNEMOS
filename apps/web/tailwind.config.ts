@@ -11,6 +11,37 @@ const config: Config = {
   ],
   theme: {
     extend: {
+      keyframes: {
+        // Reveal wipe for the auth surface. Deliberately CSS rather than a JS
+        // animation: if the animation never runs, `forwards` is irrelevant but
+        // the element is already off-screen at 100%, so content can never end up
+        // permanently hidden behind it. A JS-driven overlay fails the other way.
+        wipe: {
+          "0%": { transform: "translateX(0%)" },
+          "100%": { transform: "translateX(101%)" },
+        },
+        "fade-up": {
+          "0%": { opacity: "0", transform: "translateY(10px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
+        // Decorative ring on the auth surface. Disabled entirely under
+        // prefers-reduced-motion by the component, not merely slowed.
+        orbit: {
+          "0%": {
+            transform:
+              "rotate(0deg) translateY(calc(var(--radius) * 1px)) rotate(0deg)",
+          },
+          "100%": {
+            transform:
+              "rotate(360deg) translateY(calc(var(--radius) * 1px)) rotate(-360deg)",
+          },
+        },
+      },
+      animation: {
+        wipe: "wipe 0.45s ease-in forwards",
+        "fade-up": "fade-up 0.4s ease-out both",
+        orbit: "orbit calc(var(--duration) * 1s) linear infinite",
+      },
       colors: {
         error: "#ffb4ab",
         "secondary-fixed": "#ffddb5",

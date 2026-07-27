@@ -1,5 +1,13 @@
 """MNEMOS memory core — CockroachDB-backed agent memory."""
 
+from .auth import (
+    Account,
+    Accounts,
+    AuthError,
+    Entitlement,
+    NotEntitled,
+    TRIAL_DAYS,
+)
 from .artifacts import ArtifactStore, get_artifact_store
 from .db import connect, migrate, run_in_transaction, transaction
 from .intelligence import (
@@ -20,7 +28,8 @@ from .memory import (
 )
 
 __all__ = [
-    "ArtifactStore", "get_artifact_store", "CONFIDENCE_HALF_LIFE_DAYS",
+    "Account", "Accounts", "ArtifactStore", "AuthError", "Entitlement", "NotEntitled",
+    "TRIAL_DAYS", "get_artifact_store", "CONFIDENCE_HALF_LIFE_DAYS",
     "Correlation", "MemoryIntelligence", "Reconciliation", "confidence_for",
     "Candidate", "CostCeilingExceeded", "DedupVerdict", "EMBED_DIM", "Embedder",
     "Memory", "Recalled", "ScopeViolation", "connect", "get_embedder", "migrate", "run_in_transaction",
