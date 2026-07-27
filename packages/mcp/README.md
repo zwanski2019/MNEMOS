@@ -1,7 +1,30 @@
-# packages/mcp — CockroachDB Cloud Managed MCP
+# `packages/mcp` — CockroachDB Cloud Managed MCP Server
 
-Config + client wrapper for the **Cloud Managed MCP Server**. The analyst reads memory through
-MCP in **read-only mode** during execution (`https://cockroachlabs.cloud/mcp`) — the same MCP an
-operator uses from Claude Code.
+How the analyst reads memory during execution: over MCP, read-only.
 
-Status: **P5 — not yet implemented.** See root `CLAUDE.md` §5.
+Giving the analyst MCP read access instead of a database connection means it
+**structurally cannot write** to the memory it is reasoning over, so recall can never
+contaminate the findings store or the audit trail. Config lives in
+[`cockroachdb-cloud.json`](./cockroachdb-cloud.json).
+
+```bash
+claude mcp add cockroachdb-cloud https://cockroachlabs.cloud/mcp \
+  --transport http --header "mcp-cluster-id: $CRDB_CLUSTER_ID"
+```
+
+Auth is OAuth against the CockroachDB Cloud session — there is no secret in the config
+file, and the cluster id is an identifier rather than a credential.
+
+## The same posture, locally
+
+MCP is a cloud service, so the test suite and `make demo` cannot depend on it. Instead
+[`002_roles.sql`](../memory/migrations/002_roles.sql) creates `mnemos_analyst_ro`, a
+principal with `SELECT` on every table and nothing else. Dev and cloud therefore have
+identical security properties, and `make verify-invariants` proves the read-only
+boundary without needing a network round trip.
+
+| | Production | Local |
+|---|---|---|
+| Analyst reads memory via | Cloud Managed MCP Server | `mnemos_analyst_ro` role |
+| Analyst can write | No | No |
+| Enforced by | CockroachDB Cloud | CockroachDB privileges |

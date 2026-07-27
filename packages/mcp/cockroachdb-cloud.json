@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "CockroachDB Cloud Managed MCP Server — how the analyst reads memory in production.",
+    "Read-only by default and audited on the CockroachDB side, which is the whole point:",
+    "the model can recall memory but is structurally incapable of writing to the memory",
+    "it is reasoning over. The local equivalent is the mnemos_analyst_ro role created in",
+    "packages/memory/migrations/002_roles.sql, so dev and cloud have identical posture.",
+    "",
+    "Auth is OAuth against the CockroachDB Cloud session — there is no secret in this file.",
+    "The cluster id is an identifier, not a credential.",
+    "",
+    "Register with:",
+    "  claude mcp add cockroachdb-cloud https://cockroachlabs.cloud/mcp \\",
+    "    --transport http --header 'mcp-cluster-id: eefc65c5-1748-4306-aed4-1dfee2173a45'"
+  ],
+  "mcpServers": {
+    "cockroachdb-cloud": {
+      "type": "http",
+      "url": "https://cockroachlabs.cloud/mcp",
+      "headers": {
+        "mcp-cluster-id": "eefc65c5-1748-4306-aed4-1dfee2173a45"
+      }
+    }
+  }
+}
