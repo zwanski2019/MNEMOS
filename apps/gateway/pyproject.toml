@@ -1,0 +1,13 @@
+[project]
+name = "mnemos-gateway"
+version = "0.1.0"
+description = "MNEMOS gateway — the single audited choke point"
+requires-python = ">=3.11"
+dependencies = ["mnemos-memory", "fastapi>=0.115", "uvicorn[standard]>=0.30", "pydantic>=2.7"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mnemos_gateway*"]
