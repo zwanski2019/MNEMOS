@@ -101,20 +101,24 @@ infra/        ccloud · lambda · bedrock provisioning           (P6)
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| P0 | Monorepo scaffold + root docs (README, ARCHITECTURE, Makefile, docker-compose, LICENSE) | ✅ done |
-| P1 | Memory core — CRDB schema, migrations, vector ops (`packages/memory`) | ⬜ scaffolded |
-| P2 | Gateway — scope guard (fail-closed), dedup, audit (`apps/gateway`) | ⬜ scaffolded |
-| P3 | Go scanner core — enum, fetch, endpoint extraction (`services/scanner`) | ⬜ scaffolded |
-| P4 | Embeddings pipeline — chunk + Titan V2 (1024-dim) → vector index | ⬜ scaffolded |
-| P5 | Analyst + MCP recall (`apps/analyst`, `packages/mcp`) | ⬜ scaffolded |
-| P6 | Deploy — `ccloud` provisioning, Lambda, Bedrock (`infra`) | ⬜ scaffolded |
-| P7 | Mission Control UI — 7 routes + settings, fixture data (`apps/web`) | ✅ done |
-| P8 | Seed authorized sandbox + `make demo` end-to-end cycle | ⬜ todo |
-| P9 | Public repo + live demo URL | 🔶 repo public; demo URL todo |
+| P0 | Monorepo scaffold + root docs | ✅ done |
+| P1 | Memory core — CRDB schema, migrations, vector ops (`packages/memory`) | ✅ done |
+| P2 | Gateway — scope guard (fail-closed), dedup, audit (`apps/gateway`) | ✅ done |
+| P3 | Deterministic scanner core (`packages/recon`, Python reference impl) | ✅ done |
+| P4 | Embeddings pipeline — chunk + Titan V2 (1024-dim) → vector index | ✅ done |
+| P5 | Analyst + read-only recall (`mnemos_analyst_ro` role; MCP in cloud) | ✅ done |
+| P6 | Deploy — `ccloud` provisioning, Lambda, Bedrock (`infra`) | ⬜ needs cloud creds |
+| P7 | Mission Control UI — 7 routes (`apps/web`) | ✅ deployed |
+| P8 | Authorized sandbox + `make demo` end-to-end cycle | ✅ done |
+| P9 | Public repo + live demo URL | ✅ https://mnemos-mission-control.vercel.app |
 | P10 | < 3-minute demo video | ⬜ todo |
 
-Transient UI states not yet built (low priority, add on request): reindex-progress splash,
-cluster-investigation, correlation-rule-config, deep-scan, purge/deploy success splashes.
+Go scanner (`services/scanner`) is still scaffolded; `packages/recon/scanner.py` is the
+reference implementation of its contract and what `make demo` runs today.
+
+Mission Control currently renders fixture data. The gateway read endpoints
+(`/findings`, `/runs`, `/audit`, `/stats`, `/memory/recall`) exist and are tested; wiring
+the UI to them is the next change.
 
 ## 10. How agents should work here
 

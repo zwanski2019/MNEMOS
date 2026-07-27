@@ -2,7 +2,7 @@
 # Production runs against CockroachDB Cloud on AWS; this is for offline development only.
 services:
   crdb:
-    image: cockroachdb/cockroach:latest-v24.3
+    image: cockroachdb/cockroach:latest-v25.3  # v25.2+ required for distributed vector indexing
     command: start-single-node --insecure
     ports:
       - "26257:26257" # SQL

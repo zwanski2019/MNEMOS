@@ -1,20 +1,34 @@
 # MNEMOS — reproducible entrypoints.
-# `make demo` must provision, seed, and run an end-to-end scenario with env vars only.
+# `make demo` provisions, seeds, and runs an end-to-end scenario from env vars only.
 
-.PHONY: help install dev build provision seed demo test clean
+PY      ?= .venv/bin/python
+PIP     ?= uv pip install --python $(PY)
+COMPOSE ?= docker compose
+
+# Local default; override with the CockroachDB Cloud connection string.
+export DATABASE_URL ?= postgresql://root@localhost:26257/mnemos?sslmode=disable
+
+.PHONY: help install dev build db-up db-down migrate demo demo-cloud gateway test \
+        verify-invariants lint clean
 
 help:
 	@echo "MNEMOS targets:"
-	@echo "  install    Install web + workspace deps (pnpm)"
-	@echo "  dev        Run the Mission Control UI locally (:3000)"
-	@echo "  build      Build the web app"
-	@echo "  provision  [P6] Stand up CRDB Cloud + AWS via ccloud/SAM"
-	@echo "  seed       [P8] Load the authorized sandbox target"
-	@echo "  demo       [P8] Full end-to-end recon cycle against the sandbox"
-	@echo "  test       Run unit tests across packages"
+	@echo "  install            Install web + python workspace deps"
+	@echo "  db-up              Start CockroachDB + NATS + MinIO locally"
+	@echo "  migrate            Apply the memory schema (idempotent)"
+	@echo "  demo               Full two-pass recon cycle — the thesis, in one command"
+	@echo "  demo-cloud         Same, against CockroachDB Cloud + Bedrock (needs creds)"
+	@echo "  gateway            Run the FastAPI gateway on :8080"
+	@echo "  dev                Run Mission Control locally (:3000)"
+	@echo "  test               Full test suite (needs db-up)"
+	@echo "  verify-invariants  Prove the append-only guarantees from outside the app"
+	@echo "  db-down            Stop local infrastructure"
 
 install:
 	pnpm install
+	uv venv .venv
+	$(PIP) -e packages/memory -e packages/recon -e apps/gateway
+	$(PIP) pytest
 
 dev:
 	pnpm dev
@@ -22,18 +36,40 @@ dev:
 build:
 	pnpm build
 
-# --- Not yet implemented (tracked in CLAUDE.md §9) ---
-provision:
-	@echo "TODO(P6): infra/ccloud provisioning + migrations"; exit 1
+db-up:
+	$(COMPOSE) up -d
+	@echo "waiting for CockroachDB…"
+	@until $(COMPOSE) exec -T crdb ./cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; \
+		do sleep 1; done
+	@echo "CockroachDB ready on :26257 (console :8081)"
 
-seed:
-	@echo "TODO(P8): scripts/seed_sandbox.py"; exit 1
+db-down:
+	$(COMPOSE) down
 
+migrate:
+	$(PY) -c "from mnemos_memory import migrate; print('applied:', ', '.join(migrate()))"
+
+# The demo runs offline by default so a fresh clone works with no cloud account.
 demo:
-	@echo "TODO(P8): end-to-end sandbox recon cycle"; exit 1
+	MNEMOS_EMBEDDER=$${MNEMOS_EMBEDDER:-auto} MNEMOS_ANALYST=$${MNEMOS_ANALYST:-auto} \
+		$(PY) scripts/demo.py --reset
+
+# Explicitly the production path: CockroachDB Cloud + Bedrock Titan + Claude.
+demo-cloud:
+	@test -n "$$DATABASE_URL" || (echo "set DATABASE_URL to your CockroachDB Cloud DSN"; exit 1)
+	MNEMOS_EMBEDDER=bedrock MNEMOS_ANALYST=bedrock $(PY) scripts/demo.py --reset
+
+gateway:
+	$(PY) -m uvicorn mnemos_gateway.app:app --host 0.0.0.0 --port 8080
 
 test:
-	@echo "TODO: wire package test suites"; exit 0
+	$(PY) -m pytest tests/ -q
+
+verify-invariants:
+	$(PY) -m pytest tests/test_invariants.py -q -k "append_only or fails_closed or ceiling"
+
+lint:
+	$(PY) -m compileall -q packages apps/gateway scripts
 
 clean:
-	rm -rf apps/web/.next node_modules apps/web/node_modules
+	rm -rf apps/web/.next node_modules apps/web/node_modules .venv

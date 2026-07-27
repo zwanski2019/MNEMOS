@@ -3,40 +3,142 @@
 **An autonomous reconnaissance agent whose memory is the product.**
 Submission for the **CockroachDB × AWS Hackathon — Build with Agentic Memory**.
 
-CockroachDB is the always-on, globally-consistent memory layer that lets the agent **dedup
-findings across sessions and regions, recall prior context via distributed vector search, and
-enforce scope as immutable transactional data with a full SQL audit trail.** Without that memory
-the agent doesn't degrade — it stops.
+Point any autonomous scanner at a target twice and it re-reports the same subdomain,
+the same leaked key, the same stale endpoint — because every run starts from zero.
+Security teams are not drowning in missed findings. They are drowning in duplicates.
 
-**Live demo:** _not yet deployed_ — one-click deploy in [Deploy Mission Control](#deploy-mission-control) below.
-<!-- After the first deploy, replace the line above with: **Live demo:** https://<project>.vercel.app -->
+MNEMOS inverts that. CockroachDB is not a sink at the end of the pipeline; it is what
+decides whether the agent is allowed to act at all. **Take the memory away and MNEMOS
+does not degrade gracefully — it stops.**
+
+**Live demo:** https://mnemos-mission-control.vercel.app
 
 ---
 
-## Judging axes, one sentence each
+## See it in 60 seconds
 
-- **Agentic Memory Design** — every table earns its place; the distributed vector index drives
-  cross-session recall and dedup, not a demo query.
-- **Technical Implementation** — deterministic Go scanner core + thin Bedrock analyst, with the
-  gateway as the single audited choke point.
-- **Real-World Impact** — a recon agent that remembers is the difference between signal and noise
-  for security teams drowning in duplicate findings.
-- **Production Readiness** — fail-closed scope guard, immutable scope decisions, and an audit row
-  on every DB touch.
-- **Creativity & Originality** — memory framed as the product, demonstrated live: the second run
-  is smart *because* of the first.
+```bash
+make install     # web + python workspaces
+make db-up       # CockroachDB v25.3 + NATS + MinIO
+make demo        # two passes over the same authorised sandbox
+```
+
+`make demo` runs the identical recon cycle twice. The second pass sees one genuinely
+new asset and an otherwise unchanged estate:
+
+```
+━━ 1 · first visit — nothing remembered yet ━━
+    observations : 6
+    written      : 6
+    deduped      : 0
+
+━━ 2 · second visit — same estate, one new bundle ━━
+    observations : 10
+    recalled     : 80   (prior context pulled from memory)
+    written      : 4
+    deduped      : 6    (blocked before write)
+
+6 duplicate findings never reached the findings table.
+They were stopped by a vector-similarity check against what pass 1 had
+already written — recall from CockroachDB, not state held in this process.
+```
+
+Every number there is read back **out of CockroachDB** after the run. Nothing is
+accumulated in process memory, because the database *is* the agent's memory.
+
+No AWS account? The demo still runs — it falls back to a clearly-labelled offline
+embedder and analyst, and says so. With credentials it uses Bedrock Titan V2 + Claude:
+
+```bash
+export DATABASE_URL='postgresql://…@…cockroachlabs.cloud:26257/mnemos?sslmode=verify-full'
+make demo-cloud   # MNEMOS_EMBEDDER=bedrock MNEMOS_ANALYST=bedrock
+```
+
+---
+
+## The cycle
+
+```
+scan → index → RECALL → reason → DEDUP → scope → write → audit
+```
+
+The ordering is the product, and it lives in exactly one function
+([`cycle.run_cycle`](packages/recon/mnemos_recon/cycle.py)) so there is one thing to review.
+
+1. **Target + scope** are written to `targets` and `scope_decisions` in a single
+   transaction. Scope is immutable data, never a config flag.
+2. **Deterministic scanners** enumerate assets and parse JS bundles. No model in the
+   hot path — given the same bytes, the same observations, every time. That is what
+   makes dedup meaningful: when pass 2 reports something new, the target changed.
+3. **Embed** every chunk with Bedrock Titan Text Embeddings V2 (1024-dim) into
+   `embeddings`, behind CockroachDB's distributed vector index.
+4. **RECALL** — before the analyst is allowed to form an opinion, it vector-searches
+   `embeddings` *and* `findings` across every prior session for this target.
+5. **DEDUP then SCOPE then WRITE** — a cheap fingerprint gate, then a vector-similarity
+   gate, then a fail-closed scope check. All three live inside `commit_finding`, which
+   is the only write path to `findings`, so no future call site can skip them.
+6. **Audit** — `agent_runs` (tokens, cost, latency) and `audit_log` on every decision.
+
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the diagram.
+
+---
+
+## The four invariants, and how they are enforced
+
+These are the judged thesis, so none of them are enforced by good intentions.
+
+| Invariant | Enforced by | Proven by |
+|---|---|---|
+| Recall before reason, dedup before write | `commit_finding` re-runs both gates itself | `test_identical_finding_is_written_once`, `test_semantically_similar_finding_is_deduped` |
+| Deny by default | `check_scope` returns `False` on *any* error, including an unreachable database | `test_unknown_host_is_denied`, `test_scope_guard_fails_closed_when_memory_is_unreachable` |
+| Everything is audited | **CockroachDB privileges** — the app role has `SELECT, INSERT` on `audit_log` and `scope_decisions`. No `UPDATE`. No `DELETE`. | `test_append_only_ledgers_reject_update_and_delete` |
+| Cost ceiling per run | Evaluated from the committed running total in `agent_runs`, not an in-process counter | `test_ceiling_is_read_from_the_database_not_the_process` |
+
+That third row is the one worth pausing on. From
+[`002_roles.sql`](packages/memory/migrations/002_roles.sql):
+
+```sql
+GRANT SELECT, INSERT ON TABLE scope_decisions TO mnemos_agent;
+GRANT SELECT, INSERT ON TABLE audit_log       TO mnemos_agent;
+```
+
+An attacker — or a bug — holding the application's credentials still cannot rewrite
+the record of what the agent was allowed to do, or erase the evidence of what it did:
+
+```
+$ make verify-invariants
+ERROR: user … does not have UPDATE privilege on relation scope_decisions
+ERROR: user … does not have DELETE privilege on relation audit_log
+```
+
+The analyst is a separate principal (`mnemos_analyst_ro`) that is `SELECT`-only
+everywhere — the same posture the CockroachDB Cloud Managed MCP Server gives us in
+production. The model can recall memory but is structurally incapable of writing to
+the memory it is reasoning over.
+
+---
 
 ## CockroachDB tools used
 
-- **Distributed Vector Indexing** — `embeddings_vec` + `findings_vec` power recall and dedup.
-- **Cloud Managed MCP Server** — the analyst reads memory read-only through MCP during execution.
-- **`ccloud` CLI** — provisions the cluster, applies migrations, configures the vector index.
+- **Distributed Vector Indexing** — `embeddings_vec` and `findings_vec`
+  (`vector_cosine_ops`, 1024-dim) carry two load-bearing paths: cross-session
+  **recall** and pre-write **dedup**. Not a demo query — remove the index and the
+  agent has nothing to compare against.
+- **Cloud Managed MCP Server** — how the analyst reads memory during execution,
+  read-only. Mirrored locally by the `mnemos_analyst_ro` role so the security posture
+  is identical in dev and in cloud.
+- **`ccloud` CLI** — provisions the cluster, applies migrations, configures the vector
+  indexes, so `make demo-cloud` needs no manual console steps.
+- **Agent Skills Repo** — vendored under [`.agents/skills`](.agents/skills) and used
+  during development for schema review and cluster operations.
 
 ## AWS services used
 
-- **Amazon Bedrock** — analyst (Claude) + Titan Text Embeddings V2 (1024-dim).
-- **AWS Lambda** — Go scanner workers, event-driven off NATS/SQS.
-- **Amazon S3** — content-addressed raw artifact storage.
+- **Amazon Bedrock** — Claude as the analyst (`converse`), Titan Text Embeddings V2
+  for every vector CockroachDB indexes.
+- **AWS Lambda** — the deterministic Go scanner core, event-driven off NATS.
+- **Amazon S3** — content-addressed raw artifacts; the address and metadata stay in
+  CockroachDB so memory remains queryable and joinable next to the vectors.
 
 ---
 
@@ -44,50 +146,58 @@ the agent doesn't degrade — it stops.
 
 ```
 apps/
-  web/        Mission Control UI — Next.js 15 (this is what runs today)
-  gateway/    FastAPI: scope guard, dedup, audit           (P2)
-  analyst/    Bedrock analyst + MCP recall                 (P5)
-services/
-  scanner/    Go deterministic core → Lambda               (P3/P6)
+  web/        Mission Control — Next.js 15, 7 routes          deployed
+  gateway/    FastAPI: scope guard, dedup, audit              built
 packages/
-  memory/     CRDB schema, migrations, vector ops          (P1)
-  mcp/        Cloud Managed MCP config + client            (P5)
-  schemas/    shared pydantic/zod types
-infra/        ccloud · lambda · bedrock provisioning       (P6)
+  memory/     CRDB schema, migrations, vector ops, recall     built
+  recon/      deterministic scanner, analyst, the cycle       built
+services/
+  scanner/    Go core → Lambda                                scaffolded
+scripts/
+  demo.py     the two-pass end-to-end                         built
+tests/        22 tests, invariant-first                       built
 ```
 
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the data-flow diagram and `CLAUDE.md` for the full
-build contract.
-
----
-
-## Run the Mission Control UI locally
-
-Requires Node 20+ and pnpm.
+## Running the pieces
 
 ```bash
-pnpm install
-pnpm dev          # → http://localhost:3000
+make db-up            # CockroachDB v25.3 (v25.2+ required for vector indexing)
+make migrate          # idempotent schema + roles
+make demo             # the two-pass cycle
+make test             # 22 tests
+make verify-invariants
+make gateway          # FastAPI on :8080, OpenAPI at /docs
+make dev              # Mission Control on :3000
 ```
 
-Routes: `/` Overview · `/targets` · `/runs` Live Runs · `/findings` · `/memory` · `/scope` ·
-`/audit`. The UI is currently wired to representative fixture data; it points at the live gateway
-once P2 lands.
+The gateway's interesting responses are its refusals: `403` for out of scope, `409`
+for "memory already knew". The second one is a success for the system.
 
-## Deploy Mission Control
+## Configuration
 
-The web app deploys to **Vercel** as-is — every route prerenders to static and runs on fixture
-data, so no backend is required for the demo. Build settings live in
-[`apps/web/vercel.json`](apps/web/vercel.json).
+Copy `.env.example` to `.env`. Nothing in the codebase reads a secret from anywhere
+else, and `make demo` runs from environment variables alone.
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fzwanski2019%2FMNEMOS&project-name=mnemos&root-directory=apps%2Fweb)
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | CockroachDB DSN. Defaults to the local cluster. |
+| `MNEMOS_EMBEDDER` | `bedrock` \| `offline` \| `auto` (default) |
+| `MNEMOS_ANALYST` | `bedrock` \| `offline` \| `auto` (default) |
+| `AWS_REGION`, `BEDROCK_*` | Bedrock model selection |
+| `MNEMOS_COST_CEILING_USD` | Per-run halt threshold |
 
-Or import manually: **Add New → Project → import `zwanski2019/MNEMOS`**, then set **Root Directory =
-`apps/web`** (the pnpm workspace and Next.js are auto-detected). After the first deploy, put the
-`*.vercel.app` URL in the **Live demo** link at the top of this file and in the repo's
-**About → Website** field.
+`auto` probes AWS with a single STS call before choosing — credentials that exist but
+are *rejected* degrade to the offline path instead of failing on the first observation.
 
-## Status
+## Scope and ethics
 
-Mission Control UI (P7) is up. Memory core, scope guard, scanner, analyst, and cloud deploy
-(P1–P6, P9) are scaffolded and tracked in `CLAUDE.md` §9. Build phases are committed in order.
+MNEMOS is built for authorised testing only. The demo ships an **offline fixture
+corpus** ([`sandbox.py`](packages/recon/mnemos_recon/sandbox.py)) standing in for an
+estate we own: the scanner parses it through exactly the code path it would use
+against a live host, but no packet leaves the machine. Pointing it at a real target
+requires writing an authorisation string and explicit allow rules into
+`scope_decisions` first — and with no allow rule, the agent can do nothing at all.
+
+## Licence
+
+MIT — see [LICENSE](./LICENSE).
